@@ -14,15 +14,14 @@ polling.
 [![License: MIT](https://img.shields.io/npm/l/opencode-courier)](LICENSE)
 [![Supported OpenCode V2 version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fivopogace%2Fopencode-courier%2Fmain%2Fpackage.json&query=%24.peerDependencies%5B%27%40opencode%2Fplugin%27%5D&label=opencode&color=blue)](#supported-opencode-version)
 
-![A parent spawns two slow children, writes a README itself, and is woken by each report](docs/demo-async-tui.gif)
+https://github.com/user-attachments/assets/74a50b9c-462a-43f5-8737-bc7dd1917988
 
-A parent writes a README while two slow children work, and each report wakes it ([the
-prompt](#demos)).
+The edge cases on the live terminal UI, narrated ([what it shows](#demos)).
 
 ## Quickstart
 
 ```bash
-npm install -g @opencode/cli@2.0.29   # OpenCode V2, at the version courier is tested on
+npm install -g @opencode/cli@2.0.32   # OpenCode V2, at the version courier is tested on
 opencode plugin add opencode-courier  # by name, so OpenCode offers new releases
 opencode                              # in any folder
 ```
@@ -39,71 +38,62 @@ If OpenCode asks to allow a child's command, the parent passes the question to y
 sometimes stall on a request; if nothing moves for a few minutes, send the prompt again. Next:
 [Using it](#using-it).
 
-
 ## OpenCode V2 native
 
 Courier is built on OpenCode V2's plugin API (`@opencode/plugin`), not the V1 one
-(`@opencode-ai/plugin`), and needs OpenCode V2. Each release is pinned to one V2 version and tested
-against it end to end; the current one is tested on **OpenCode 2.0.29**. CI also runs the live
-suite on the newest OpenCode release, on `main` and nightly, so a host release that breaks the
-plugin shows up there first. Older releases and their versions: [Supported OpenCode version](#supported-opencode-version).
+(`@opencode-ai/plugin`). Each release is pinned to one V2 version and tested against it end to end;
+the current one is tested on **OpenCode 2.0.32**. CI also runs the live suite on the newest OpenCode
+release, on `main` and nightly. Older releases: [every release](docs/reference.md#the-opencode-version).
 
 ## Courier or the built-in subagent tool?
 
-OpenCode V2 has its own [`subagent` tool](https://opencode.ai/v2/docs/agents): it starts an agent
-with fresh context in a child session, and the parent either waits for its final answer or, with
-`background: true`, carries on and is notified when the child finishes; passing the child's
-`sessionID` back prompts it again. Use it when one result back is all you need: a search, a review,
-a self-contained task that needs nothing from you on the way. Use courier when the work needs more:
+OpenCode V2's own [`subagent` tool](https://opencode.ai/v2/docs/agents) starts an agent with fresh
+context in a child session; the parent waits for its final answer or, with `background: true`, is
+notified when the child finishes. Use it when one result back is all you need. Use courier when the
+work needs more:
 
-- **Messages from the child, mid-run:** a child reports progress, or asks its parent something,
+- **Messages from the child, mid-run:** a child reports progress or asks its parent something
   whenever it likes with `courier_send`, and any session can message any other.
 - **Waking an idle session from anywhere:** a message from a child, a schedule (`courier_later`) or
-  a [webhook](#webhooks) (GitHub reviews, comments and CI runs, or any signed POST) starts a new turn
-  in a session that has ended its own.
-- **Worktree isolation:** `isolate: true` gives a child its own git worktree, so children can edit
-  files in parallel; each commits on `courier/<its session ID>` and reports that branch for its
-  parent to merge ([nested isolation](docs/reference.md#nested-isolation)).
-- **Relaying to you:** a child's permission requests and questions reach you through the parent:
-  a request is approved in OpenCode's own permission prompt in the parent's session, never by its
-  model, and your answers go back; a form only you can answer is pointed out to you.
+  a [webhook](#webhooks) starts a new turn in a session that has ended its own.
+- **Worktree isolation:** `isolate: true` gives a child its own git worktree, so children edit files
+  in parallel; each commits on `courier/<its session ID>` and reports that branch for its parent to
+  merge ([nested isolation](docs/reference.md#nested-isolation)).
+- **Relaying to you:** a child's permission requests and questions reach you through the parent. A
+  request is approved in OpenCode's own permission prompt in the parent's session, never by its
+  model; a form only you can answer is pointed out to you.
 
 ## How it works
 
-A parent session calls `courier_spawn`, gets a session id back immediately and ends its turn. The
-child works on its own and, when it is done or stuck, calls `courier_send` with the parent's id, a
-status and what it produced. That message lands in the parent's inbox and OpenCode starts a new turn
-for the parent if it is idle. There is no polling anywhere: a message is admitted into the target
-session's inbox through OpenCode's own API, the way OpenCode's background subagents report to their
-parent. Delivery is `steer` by default (injected into the target's running turn, or starts one if
-idle); `queue: true` waits until the current turn ends.
+A parent calls `courier_spawn`, gets a session id back at once and ends its turn. The child works
+on its own and, when done or stuck, calls `courier_send` with the parent's id, a status and what it
+produced. The message lands in the parent's inbox through OpenCode's own API, the way OpenCode's
+background subagents report, and starts a new turn if the parent is idle. Delivery is `steer` by
+default (into the target's running turn, or a new one if idle); `queue: true` waits until the current
+turn ends.
 
 ## Demos
 
-**The parent does not wait.** Prompt: *"Spawn two children: one runs `sleep 30` then lists the
-exports of math.js, the other runs `sleep 45` then lists the exports of text.js. Don't wait for
-them: meanwhile write a short README.md for this folder yourself, and add their reports to it when
-they arrive."* The recording at the top is this run: the parent writes its README and finishes its
-turn 16 seconds in, while both children still sleep; each report (the `Message from ses_…` line)
-then starts a new turn on its own, and the parent folds it into the README.
+The video at the top (1:46, narrated) is the TUI driven in `tmux` on the live test's scripted
+stand-in model, so each scene is real plugin behaviour:
 
-**A child's question reaches you.** Prompt: *"Spawn a child session to add a multiply function to
-math.js. It must ask me first whether to name it multiply, times or product."*
-
-![A child's question opens as a form in the parent's session, times is picked, and the child carries on](docs/demo-question-tui.gif)
-
-The child's question opens in the parent's session as OpenCode's own question form, `times` is
-picked, and the child adds `times` to math.js and reports. Both recordings are real runs with a free
-model on [OpenCode Zen](https://opencode.ai/zen) (Muse Spark 1.3).
+- **A join group:** one member reports and its report is held with the group, while the other waits
+  on a permission request, so the footer says one is waiting on you. You allow it from the asks inbox
+  (`ctrl+x k`), and both reports reach the parent in one message.
+- **A child whose turn fails:** OpenCode shows "Session failed", the parent is told, and the
+  `/courier tree` row reads `failed`.
+- **A child that ends its turn without a report:** the parent is told, and the row says so.
+- **`/courier stop`:** pick the session, confirm, and it is stopped.
+- **A form only you can answer:** a child's web search shows a form; the footer, the panel row and
+  the asks inbox point to it, and answering it there wakes the parent.
 
 ## Recursive orchestration
 
 A session can split a goal across child sessions, each child deciding in turn whether to split its
-part again, with the results checked and integrated at every level on the way back up. The plugin
-ships the playbook as an OpenCode skill, `courier-orchestrate`, listed in every session: models are
-told to load it at the start of an implementation task that may have independent parts, and
-`/skills` in the TUI attaches it to your prompt. What it says: [the
-reference](docs/reference.md#the-courier-orchestrate-skill).
+part again, with the results checked and integrated at every level on the way back up. The playbook
+ships as the OpenCode skill `courier-orchestrate`, listed in every session: models load it at the
+start of an implementation task that may have independent parts, and `/skills` in the TUI attaches
+it to your prompt ([what it says](docs/reference.md#the-courier-orchestrate-skill)).
 
 ## Install
 
@@ -111,27 +101,27 @@ reference](docs/reference.md#the-courier-orchestrate-skill).
 
 Requires OpenCode V2: the `opencode` command from `@opencode/cli` (also installed as `opencode2`).
 Each release is built and tested against exactly one OpenCode V2 version; a row lists the releases
-pinned to its version. OpenCode never checks it:
-the plugin installs and loads on any V2 host, and on a version other than the pinned one writes one
-line to the server log naming both ([more](docs/reference.md#the-opencode-version)).
+pinned to its version. OpenCode never checks it: the plugin loads on any V2 host, and on another
+version than the pinned one writes one line to the server log
+([more](docs/reference.md#the-opencode-version)).
 
+<!-- compat-table:start rows=3: generated by script/compat-table.ts from the release tags -->
 | opencode-courier | OpenCode V2 (`opencode` and `@opencode/plugin`) |
 |---|---|
-| 0.5.0 | 2.0.29 |
-| 0.4.0, 0.4.1 | 2.0.28 |
-| 0.2.3, 0.3.0 | 2.0.26 |
-| 0.2.2 | 2.0.24 |
-| 0.2.1 | 2.0.23 |
-| 0.2.0 | 2.0.22 |
-| 0.1.6 | 0.0.0-beta-19271 (the beta line: `opencode2` from `@opencode-ai/cli`, and `@opencode-ai/plugin`) |
+| 0.7.3, 0.8.0, 0.9.0 | 2.0.32 |
+| 0.7.2 | 2.0.31 |
+| 0.7.1 | 2.0.30 |
+<!-- compat-table:end -->
+
+Older releases and their versions: [every release](docs/reference.md#the-opencode-version).
 
 The [terminal part](#in-the-terminal) relies on the host to provide its UI modules and is tested on
-OpenCode 2.0.29 only; the server part works as before on older V2 hosts from 2.0.4 on.
+OpenCode 2.0.32 only; the server part works on older V2 hosts from 2.0.4 on.
 
 Check yours with `opencode --version`, and install the matching CLI with:
 
 ```bash
-npm install -g @opencode/cli@2.0.29
+npm install -g @opencode/cli@2.0.32
 ```
 
 ### The plugin
@@ -143,9 +133,8 @@ opencode plugin add opencode-courier
 This installs the package from npm and adds `"opencode-courier"` to `plugins` in the global
 configuration (`~/.config/opencode/opencode.json`); its options ([session trees](#session-trees),
 [webhooks](#webhooks)) go in the object form of that entry. Install it by name, without a version:
-OpenCode only checks plugins for updates when their entry is not an exact version, so
-`opencode-courier@0.2.1` is never offered a newer release ([moving such an
-entry](docs/reference.md#updating-the-plugin)).
+OpenCode only checks plugins for updates when their entry is not an exact version
+([updating](docs/reference.md#updating-the-plugin)).
 
 From a local clone, `bun install && npm run build`, then list its `dist` **directory** in
 `opencode.json` (V2 uses `plugins`, plural; a path to a file is ignored with a warning):
@@ -159,14 +148,15 @@ From a local clone, `bun install && npm run build`, then list its `dist` **direc
 ## Using it
 
 1. Keep the background server running so sessions can be woken while you are away (`opencode
-   service start`), and run one OpenCode server per data directory where you can: a second one, such
-   as `opencode serve` next to it, cannot pass your answer on to a child the other runs
+   service start`), and run one OpenCode server per data directory where you can: a second one
+   cannot pass your answer on to a child the other runs
    ([why](docs/reference.md#two-servers-on-one-data-directory)).
 2. Give the agents that run children the permissions their work needs: a child that hits an approval
-   prompt waits until you answer OpenCode's prompt for it in the parent's session. Let them use the `question` tool if they
-   should be able to ask you. Choose a web search provider before children search the web (run one
-   web search in your own session, or use OpenCode's "Third-party search" setting), or the first
-   child to search shows that prompt in its own session, which only you can answer there.
+   prompt waits until you answer OpenCode's prompt for it in the parent's session. Let them use the
+   `question` tool if they should be able to ask you. Choose a web search provider before children
+   search the web (run one web search in your own session, or use OpenCode's "Third-party search"
+   setting), or the first child to search shows that prompt in its own session, which only you can
+   answer there.
 3. Your own session's prompts are relayed nowhere, and each one stalls the whole tree until you
    answer it. Before an unattended run, allow the orchestrating session's toolchain up front: one rule
    on `bun run *` or `npm run *` (the skill has checks run through the project's scripts), `git`, and
@@ -195,30 +185,32 @@ From a local clone, `bun install && npm run build`, then list its `dist` **direc
 | `courier_cancel` | Drops a message scheduled with `courier_later`. |
 | `courier_subscribe` | Subscribes a session to webhook deliveries for a topic (`owner/repo`, `owner/repo#12` or a name). |
 | `courier_unsubscribe` | Drops one topic, or all of a session's. |
+| `courier_recall` | One look at what earlier session trees in this project did and the lesson each left; with `sessionID`, one tree's [record](#memory) in full. |
+| `courier_note` | Writes this tree's one lesson on its [record](#memory), for the next orchestrator in the project: one line of at most 300 characters, naming the job and the reason. A longer one is refused, a second call replaces the first. From the top or a sub-orchestrator, never a leaf. |
 
 Each tool's parameters: [the reference](docs/reference.md#the-tools).
 
 ## How children reach you
 
 - **A child reports once, with a status**: `done`, `partial`, `blocked` (it needs a decision from
-  its parent, and says what) or `failed`, with its artifacts (branch, commits, files, checks) listed
-  in the message. A message without a status is progress, not the report.
-  [More](docs/reference.md#a-childs-report).
+  its parent, and says what) or `failed`, with its artifacts in the message. A message without a
+  status is progress, not the report. [More](docs/reference.md#a-childs-report).
 - **A join group wakes you once.** Start a batch of sessions with the same `group` name, and their
-  `done`, `partial` and `failed` reports are held until the last one is in and your turn has ended,
-  then delivered in one message. A `blocked` report, a failure, a question or a permission request
-  still reaches you at once. A member that will not report holds the others back: drop it with
-  `courier_cleanup`, and the group is released without it. [More](docs/reference.md#join-groups).
-- **A child that fails, or ends its turn without reporting, is reported** to its parent by the
-  plugin, with the error or its last reply, waking it if idle; one that waits on a request, its own
-  children, a scheduled message or a webhook is not, nor is one that answers what you typed in its
-  session. [More](docs/reference.md#a-child-that-fails).
-- **Permission requests and questions reach you.** A child's request or question is passed to the
-  session at the top of its tree, any number of levels down. For a request, that session proposes an
-  answer with `courier_answer`, and OpenCode asks you in its own permission prompt, in that session
-  and under its rules, before anything is passed on: its model cannot approve, only propose. For a
-  question, it asks you and passes your answer back, or links its own question to the child's so your
-  pick goes straight to it. Whichever answer comes first counts, and the other is withdrawn.
+  `done`, `partial` and `failed` reports are held until the last one is in, then delivered in one
+  message; a `blocked` report, a failure, a question or a permission request still reaches you at
+  once. A member that will not report holds the others back: drop it with `courier_cleanup`.
+  [More](docs/reference.md#join-groups).
+- **A child that fails, or ends its turn without reporting, is reported** to its parent, with the
+  error or its last reply, unless it waits on a request, its own children, a scheduled message or a
+  webhook. [More](docs/reference.md#a-child-that-fails).
+- **A message that fails to wake its session is sent again** after 30 seconds; if the session still
+  does not take it, the footer and the tree panel show it as `stalled`, for you to prompt it.
+  [More](docs/reference.md#a-missed-wake).
+- **Permission requests and questions reach you** through the session at the top of the tree, any
+  number of levels down. For a request, that session proposes an answer with `courier_answer`, and
+  OpenCode asks you in its own permission prompt there before anything is passed on: its model
+  cannot approve, only propose. For a question, it asks you and passes your answer back, or links
+  its own question to the child's so your pick goes straight to it.
   [More](docs/reference.md#a-child-that-asks-for-permission).
 - **Some forms only you can answer**, such as OpenCode's web search asking for a provider: the top
   session is told, and you answer in the child's session. [More](docs/reference.md#a-child-that-shows-a-form).
@@ -226,7 +218,8 @@ Each tool's parameters: [the reference](docs/reference.md#the-tools).
   [terminal](#in-the-terminal). [More](docs/reference.md#seeing-and-stopping-a-subtree).
 
 Children, held reports, scheduled messages and open questions survive a compaction or a restart;
-entries are dropped after 14 days ([roster](docs/reference.md#roster)).
+entries are dropped after 14 days, or at once when OpenCode deletes the child, unless it is isolated
+([roster](docs/reference.md#roster)).
 
 ## Session trees
 
@@ -245,68 +238,84 @@ options in the plugin's `options`, in the global config:
 | `maxChildren` | `5` | How many sessions one session started may have live at once. |
 | `maxTotal` | `20` | How many spawned sessions may be live at once in one tree. |
 
-`courier_spawn` refuses a spawn past a limit, naming it and saying what to do instead: do the work
-itself, or wait for a child to report. A session counts while it is live: its turn runs, it owes
-its parent a report (its task or a message reached it after it last reported, failed or was
-interrupted), or a session below it is live. One that has reported, with nothing live below it,
-does not. Each spawned session's brief says when to split its task and when to do it itself
+`courier_spawn` refuses a spawn past a limit, naming it and saying what to do instead. A session
+counts while it is live: its turn runs, it owes its parent a report, or a session below it is live.
+Each spawned session's brief says when to split its task and when to do it itself
 ([more](docs/reference.md#session-trees-and-their-limits)).
+
+## Memory
+
+The plugin keeps **one record per session tree** in the project, from facts it already has: when the
+tree started and last moved, the top session's title and first `split:` line, with up to 3 later ones
+that read otherwise (when each was stated, and after how many parts), and for each session started
+in the tree its title, depth, isolation, join group, status, duration, cost, context use and spawns
+refused; never a report's body or artifacts. A session deleted since keeps its last status and
+duration, or reads `gone` when it had not settled, so it never holds its tree at `not finished`.
+The one thing a model writes into it is **the tree's
+lesson**, with `courier_note`: one line of at most 300 characters, from the session that verified the
+tree, with the job it comes from and the reason. `courier_recall` reads the records back, each line
+showing the split line as prose (its markdown marks dropped, the asterisks of its globs kept) cut at a
+word, then the latest later one (`then, after 1 part: split: 2 parts: …`), and saying how long the tree ran and how long ago it last moved; the `courier-orchestrate` skill asks for
+one call before the split decision and one `courier_note` before the top replies. Each record counts
+how often other trees' `courier_recall` calls listed it and opened it in full, and when last, so the
+person can tell a lesson still read from one nobody reads; a record the person pins in the terminal
+is listed first and never swept. Each project keeps 30 unpinned records, those with a lesson first,
+and none older than 90 days. `"memory":
+false` in the plugin's `options` turns it off ([more](docs/reference.md#memory)).
 
 ## In the terminal
 
-The package ships a part for OpenCode's terminal UI, which the TUI loads from the server's plugin
-list; the server half behaves the same whether or not a TUI is attached. In a session that started
-sessions, the prompt's footer shows what the tree under it is doing: how many run, wait on you or
-are idle, and for each [join group](docs/reference.md#join-groups) how many of its members have
-reported:
+The package ships a part for OpenCode's terminal UI, loaded from the server's plugin list; the server
+half behaves the same with or without it. In a session that started sessions, the prompt's footer
+shows what the tree under it is doing: how many wait on you (a permission request, a question or a
+form), are [stalled](docs/reference.md#a-missed-wake), run or are idle, and each
+[join group](docs/reference.md#join-groups)'s members reported:
 
 ```
-courier 2 running · 1 waiting on you · group pair 1/2
+courier 1 waiting on you · 2 running · group pair 1/2
 ```
 
-`/courier tree` opens a panel beside the session with the tree under it, a row per session indented
-by depth, with what it does, its report and its group's standing; a session that started others gets
-a bar of the parts reported, a leaf how long it ran, its last tool call and its cost. A tree that has
-started more than `maxTotal` sessions over time is listed live ones first, then newest, and the header
-says how many older ones are left out; the footer counts them all. `↑`/`↓` select,
-`enter` opens the session, `s` stops it and everything under it after you confirm, as `courier_stop`
-would, and `q` closes the panel; `/courier stop <session>` stops from the prompt. While open, the panel
-follows you between sessions: into one of its tree it keeps that tree, the session on screen marked
-`(on screen)`; elsewhere it shows that session's tree, or hides while you are in a session without one,
-or on the home screen, and shows again once you are back in one; only `q` closes it for good.
+`/courier tree` opens a panel beside the session with the tree under it, a row per session with a
+mark for its state (`✓` reported, a spinner while it runs, `●` waiting on you, `!` stalled, `✗`
+failed or interrupted), what it does, its report, its group's standing and, for a leaf, how long it
+ran, its last tool call, its context use and its cost. `enter` or a click opens the session, `s`
+stops it and everything under it, `x` forgets a `gone` session, `q` closes the panel;
+`/courier stop <session>` stops from the prompt. Digby, the courier's mole, digs beside the header,
+his state following the tree's. `"animations": false` in the TUI part's options keeps the panel
+still; the TUI reads a plugin's options only from its own config, `~/.config/opencode/cli.json`
+([more](docs/reference.md#in-the-terminal)):
 
-`ctrl+x k` (the leader key, then `k`), `/asks` (or `/ask`), the palette's "Courier: what waits on you" or a click
-on "waiting on you" opens the asks inbox: every permission request, question and form waiting
-anywhere in the tree, however many sessions it has, oldest first, with where it comes from, answered in
-a dialog with no model in between; the session that started the tree hears once that you settled it. The TUI plays OpenCode's
-sounds for a child's report, a group's release and a new ask ([more](docs/reference.md#in-the-terminal)).
+```jsonc
+{
+  "plugins": [{ "package": "opencode-courier", "options": { "animations": false } }]
+}
+```
 
-While a permission prompt or form is shown in the session, OpenCode hides the footer, so open the
-inbox with `ctrl+x k` (or `/asks` once the prompt is back).
+`ctrl+x k` (the leader key, then `k`), `/asks` (or `/ask`), the palette's "Courier: what waits on
+you" or a click on "waiting on you" opens the asks inbox: every permission request, question and form
+waiting anywhere in the tree, after the top session's own permission requests, with where each comes
+from, kept current while open and answered in a dialog with no model in between.
+The TUI plays OpenCode's sounds for a child's report, a group's release and a new ask. While a
+permission prompt or form is shown in the session, OpenCode hides the footer, so open the inbox with
+`ctrl+x k`.
+
+`/courier memory` (or the palette's "Courier: memory") lists the project's [tree records](#memory),
+pinned first, then newest first grouped by the day each tree last moved, one row each with how often
+other trees read it and its lesson under it. `enter` shows one in full; `p` pins or unpins the record,
+and a pinned one is listed first and never swept; `x` forgets the record under the row, or in a
+record on its lesson's rows only the lesson, after a confirm; `esc` goes back and closes. The search
+takes every letter but `x` and `p` ([more](docs/reference.md#the-memory-view)).
 
 ## Native child sessions
 
 Off by default. With `"nativeChildren": true` in the plugin's `options`, a child started without
 `isolate` is also created with OpenCode's own `parentID`, so OpenCode treats it as the parent's
-subagent: the TUI's view of the top session lists and answers the permission requests and forms of
-every session under it, and the paired web, desktop or mobile app's request dock answers a
-grandchild's ask from the top session, on a phone too. Isolated children are created as before, and
-the courier's own tree, limits and relays work as without the option. What changes
-([more](docs/reference.md#native-child-sessions)):
-
-- **Deleting a session deletes its native children**, as OpenCode does with subagents.
-- **A child does not take its parent's session rules**: courier passes it an empty ruleset, so it
-  may do what it could without the option.
-- **Providers see a subagent**: the child's model requests carry its parent's id for cache routing
-  and two headers naming the parent; **on GitHub Copilot**, which meters such requests differently
-  from a person's, courier was not tested.
-- **A child's asks show in the top session's view**, not in its own, and it leaves the TUI's session
-  lists. Its permission requests and questions are answered once, in OpenCode's own prompt there; the
-  top session's model is only told. `opencode run` and the TUI's auto-accept mode answer them as their
-  own subagents'.
-- **Turn it on only with OpenCode's TUI or the paired app**, which show those prompts; with a bare
-  API client nobody prompts you, and only `courier_answer` is left, which prompts you in the top
-  session before it passes anything on.
+subagent: the TUI's view of the top session, and the paired app's request dock, list and answer the
+permission requests, questions and forms of every session under it, and the top session's model is
+only told. Deleting a session then deletes its native children, the child gets an empty ruleset
+rather than its parent's, and providers see a subagent (not tested on GitHub Copilot). Turn it on
+only with OpenCode's TUI or the paired app, which show those prompts
+([more](docs/reference.md#native-child-sessions)).
 
 ## Webhooks
 
@@ -337,7 +346,7 @@ every default):
    arrives as a short summary marked as outside text, queued behind any running turn and waking the
    session if idle.
 
-The options, which events wake whom, the tunnels, the signing scheme and status codes: [the
+The options, which events wake whom, the signing scheme and status codes: [the
 reference](docs/reference.md#webhooks).
 
 ## Development

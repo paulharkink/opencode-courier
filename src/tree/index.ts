@@ -20,4 +20,5 @@ export type {
 export { allEntries, answeringTop, lineage, pruneExpired, RETENTION_MS } from "./roster.js"
 export { subtree } from "./subtree.js"
 export { registerTreeRpc } from "./rpc-handlers.js"
+export { handleRemote } from "./peer.js"
 export { addTreeTools } from "./tools.js"

@@ -5,6 +5,8 @@ import { forgetDropped } from "./forget.js"
 import type { CleanupPorts, CleanupResult, WorktreeState } from "./ports.js"
 import { childStore } from "./store.js"
 import { keepReason } from "./text.js"
+import { qualify } from "../platform/remote.js"
+import { remoteRequest, remoteTarget } from "../platform/remote.js"
 
 export interface CleanupInput {
   readonly sessionID: string
@@ -26,6 +28,16 @@ export async function cleanup(ports: CleanupPorts, parentID: string, input: Clea
   const forget = async () => {
     const group = await forgetDropped(ports, entry)
     return group ? { group } : {}
+  }
+  const remote = remoteTarget(ports, input.sessionID)
+  if (remote) {
+    const result = await remoteRequest<CleanupResult>(ports, remote.nodeId, "cleanup", {
+      parentID: qualify(ports.remote!.nodeId, parentID),
+      sessionID: remote.sessionID,
+      force: input.force === true,
+    })
+    if (result.outcome === "kept") return { ...result, sessionID: input.sessionID }
+    return { ...result, sessionID: input.sessionID, ...(await forget()) }
   }
   if (!entry.isolated) return { sessionID: input.sessionID, directory, outcome: "forgotten", ...(await forget()) }
   // With force the state only decides whether there is anything left to remove, so a worktree git

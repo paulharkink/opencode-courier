@@ -79,7 +79,7 @@ exports[`tools are the twelve courier tools, each a direct tool 1`] = `
 
 exports[`tools courier_spawn 1`] = `
 {
-  "description": "Start a new OpenCode session on a task and return immediately. It runs on your model. The session reports back with courier_send, which wakes this session, and you are told if its turn fails or ends without a report instead, it waits for a permission or it asks a question. Give a batch of parallel sessions one group name to be woken once, with all their reports, instead of once per report. DO NOT poll it or call courier_status in a loop: once you have started the sessions you need, end your turn by replying without calling more tools; each report, or each group's reports, starts a new turn in which you carry on. For long tasks, also courier_later a check-in for yourself in case it never reports, and courier_cancel it when it does.",
+  "description": "Start a new OpenCode session on a task and return immediately. It runs on your model. The session reports back with courier_send, which wakes this session, and you are told if its turn fails or ends without a report instead, it waits for a permission or it asks a question. Give a batch of parallel sessions one group name to be woken once, with all their reports, instead of once per report. DO NOT poll it or call courier_status in a loop: once you have started the sessions you need, end your turn by replying without calling more tools; each report, or each group's reports, starts a new turn in which you carry on. For a remote session, give its configured peer, an absolute directory on that node and a short workName; its stable ID is nodeId/sessionID and it reports to you across nodes. For long tasks, also courier_later a check-in for yourself in case it never reports, and courier_cancel it when it does.",
   "input": {
     "additionalProperties": false,
     "properties": {
@@ -87,6 +87,17 @@ exports[`tools courier_spawn 1`] = `
         "anyOf": [
           {
             "description": "Agent to run the session with; defaults to the default agent.",
+            "type": "string",
+          },
+          {
+            "type": "null",
+          },
+        ],
+      },
+      "directory": {
+        "anyOf": [
+          {
+            "description": "Absolute directory on the peer, inside its allowed roots; required for a remote spawn.",
             "type": "string",
           },
           {
@@ -116,6 +127,17 @@ exports[`tools courier_spawn 1`] = `
           },
         ],
       },
+      "peer": {
+        "anyOf": [
+          {
+            "description": "Configured remote node to run the session on.",
+            "type": "string",
+          },
+          {
+            "type": "null",
+          },
+        ],
+      },
       "task": {
         "description": "What the new session should do. It is told who started it and how to report back.",
         "type": "string",
@@ -124,6 +146,17 @@ exports[`tools courier_spawn 1`] = `
         "anyOf": [
           {
             "description": "Session title; defaults to the task's first line.",
+            "type": "string",
+          },
+          {
+            "type": "null",
+          },
+        ],
+      },
+      "workName": {
+        "anyOf": [
+          {
+            "description": "Short name for this assignment; required for a remote spawn and shared by both rosters.",
             "type": "string",
           },
           {

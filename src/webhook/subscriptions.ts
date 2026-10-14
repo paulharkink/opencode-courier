@@ -1,4 +1,5 @@
 import type { Plugin } from "@opencode/plugin"
+import type { RemoteConfig, RemoteEnvelope } from "../platform/remote.js"
 import { scanAll } from "../platform/storage.js"
 
 type Context = Plugin.Context
@@ -10,6 +11,7 @@ export interface WebhookPorts {
   readonly session: Pick<Context["session"], "synthetic" | "get">
   readonly now: () => number
   readonly log: (message: string) => void
+  readonly remote?: { readonly config: RemoteConfig; readonly handle: (request: RemoteEnvelope) => Promise<unknown> }
 }
 
 export interface Subscription {

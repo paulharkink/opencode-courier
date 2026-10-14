@@ -35,6 +35,9 @@ export const SpawnInput = Schema.Struct({
         "digits, dots, dashes and underscores, up to 60; the name is free again once the group has been delivered.",
     }),
   ),
+  peer: Schema.optional(Schema.String.annotate({ description: "Configured remote node to run the session on." })),
+  directory: Schema.optional(Schema.String.annotate({ description: "Absolute directory on the peer, inside its allowed roots; required for a remote spawn." })),
+  workName: Schema.optional(Schema.String.annotate({ description: "Short name for this assignment; required for a remote spawn and shared by both rosters." })),
 })
 
 export const SendInput = Schema.Struct({
@@ -119,7 +122,9 @@ export function addTreeTools(tools: ToolEditor, ports: TreeToolPorts) {
       "instead, it waits for a permission or it asks a question. Give a batch of parallel sessions one group name to " +
       "be woken once, with all their reports, instead of once per report. DO NOT poll it or call courier_status in a " +
       "loop: once you have started the sessions you need, end your turn by replying without calling more tools; each " +
-      "report, or each group's reports, starts a new turn in which you carry on. For long tasks, also courier_later a " +
+      "report, or each group's reports, starts a new turn in which you carry on. For a remote session, give its configured " +
+      "peer, an absolute directory on that node and a short workName; its stable ID is nodeId/sessionID and it reports to you across nodes. " +
+      "For long tasks, also courier_later a " +
       "check-in for yourself in case it never reports, and courier_cancel it when it does.",
     input: SpawnInput,
     execute: async (input, context) => {

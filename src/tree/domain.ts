@@ -97,6 +97,10 @@ export interface RosterEntry {
   readonly reports?: "status"
   /** The join group courier_spawn put it in, whose release holds its report; absent for a child in none. */
   readonly group?: string
+  /** The node that owns a remote session; the stable session reference is `nodeId/sessionID`. */
+  readonly nodeId?: string
+  /** The named assignment shared by both rosters for a remote child. */
+  readonly workName?: string
   /** Created with OpenCode's own `parentID` (the `nativeChildren` option), so OpenCode shows its asks in its parent's view. */
   readonly native?: true
 }

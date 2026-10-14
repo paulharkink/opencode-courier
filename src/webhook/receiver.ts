@@ -5,6 +5,7 @@ import { homedir } from "node:os"
 import { addBounded } from "../platform/bounded.js"
 import { sharedState } from "../platform/hub.js"
 import { isNotFound, num, obj, str } from "../platform/json.js"
+import { parseEnvelope, validSignature } from "../platform/remote.js"
 import { envelope } from "../kernel/protocol.js"
 import { GENERIC_NAME, keyOf, subscriptions, type WebhookPorts } from "./subscriptions.js"
 import { CI_EVENTS, githubSummary, hookSummary, webhookText } from "./text.js"
@@ -234,6 +235,29 @@ async function deliver(ports: WebhookPorts, request: Request, event: Event, dige
  * and body; anything unsigned is refused before parsing, and a signature already accepted is ignored.
  */
 export async function receive(ports: WebhookPorts, secret: string, request: Request, seen = new Set<string>()): Promise<Response> {
+  if (request.path === "/courier") {
+    if (request.method !== "POST") return { status: 405, body: "use POST" }
+    const remote = ports.remote
+    if (!remote) return { status: 404, body: "not found" }
+    let decoded: unknown
+    try {
+      decoded = JSON.parse(request.body.toString("utf8"))
+    } catch {
+      return { status: 400, body: "invalid Courier request" }
+    }
+    const envelope = parseEnvelope(decoded)
+    if (!envelope) return { status: 400, body: "invalid Courier request" }
+    const peer = remote.config.peers[envelope.sender]
+    if (!peer || !validSignature(peer.secret, request.body, header(request, "x-courier-signature")))
+      return { status: 401, body: "bad or missing Courier signature" }
+    if (!addBounded(seen, `courier:${envelope.sender}:${envelope.id}`, REMEMBERED))
+      return { status: 409, body: JSON.stringify({ error: "request already delivered" }) }
+    try {
+      return { status: 200, body: JSON.stringify({ result: await remote.handle(envelope) }) }
+    } catch (error) {
+      return { status: 400, body: JSON.stringify({ error: error instanceof Error ? error.message : "Courier operation failed" }) }
+    }
+  }
   const routed = route(request)
   if (isResponse(routed)) return routed
   const digest = checkSignature(secret, request.body, header(request, "x-hub-signature-256"), routed.topic)

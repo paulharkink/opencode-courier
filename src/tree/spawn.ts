@@ -5,6 +5,9 @@ import { admit } from "./limits.js"
 import type { CourierPorts, RosterEntry } from "./ports.js"
 import { childStore, groupStore } from "./store.js"
 import { childBrief, childBranch } from "./text.js"
+import { qualify } from "../platform/remote.js"
+import { remoteRequest, type PreparedRemote } from "../platform/remote.js"
+import { splitQualified } from "../platform/remote.js"
 
 export interface SpawnInput {
   readonly task: string
@@ -12,6 +15,9 @@ export interface SpawnInput {
   readonly agent?: string
   readonly isolate?: boolean
   readonly group?: string
+  readonly peer?: string
+  readonly directory?: string
+  readonly workName?: string
 }
 
 function titleOf(task: string) {
@@ -48,11 +54,104 @@ export async function spawn(ports: CourierPorts, parentID: string, input: SpawnI
   const group = typeof input.group === "string" ? input.group.trim() || undefined : (input.group ?? undefined)
   if (group !== undefined && !isGroupName(group))
     throw new Error(`group must be a name of 1 to 60 letters, digits, dots, dashes or underscores, not ${JSON.stringify(group)}.`)
+  const parent = await childStore(ports.storage).indexedEntry(parentID)
+  if (parent && splitQualified(parent.parentID))
+    throw new Error("remote work sessions cannot start Courier children; ask the Head Unit to dispatch the work")
+  if (input.peer !== undefined || input.directory !== undefined || input.workName !== undefined) {
+    if (!input.peer || !input.directory || !input.workName?.trim())
+      throw new Error("a remote spawn requires peer, an absolute directory on that peer, and workName")
+    if (!ports.remote?.peers[input.peer]) throw new Error(`remote peer ${input.peer} is not configured`)
+    const admitted = await admit(ports, parentID)
+    try {
+      return await startRemote(ports, parentID, input, admitted, group)
+    } finally {
+      admitted.release()
+    }
+  }
   const admitted = await admit(ports, parentID)
   try {
     return await start(ports, parentID, input, admitted, group)
   } finally {
     admitted.release()
+  }
+}
+
+async function startRemote(ports: CourierPorts, parentID: string, input: SpawnInput, admitted: Awaited<ReturnType<typeof admit>>, group: string | undefined) {
+  const peer = input.peer!
+  const workName = input.workName!.trim()
+  if (workName.length > 120 || /[\r\n]/.test(workName)) throw new Error("workName must be 1 to 120 characters on one line")
+  const parent = await ports.session.get({ sessionID: parentID }).catch(() => undefined)
+  const prepared = await remoteRequest<PreparedRemote>(ports, peer, "prepare", {
+    directory: input.directory,
+    task: input.task,
+    workName,
+    ...(input.title ? { title: input.title } : {}),
+    ...(input.agent ? { agent: input.agent } : {}),
+    ...(input.isolate ? { isolate: true } : {}),
+    ...(parent?.model ? { parentModel: parent.model } : {}),
+  })
+  const sessionID = qualify(peer, prepared.sessionID)
+  admitted.reservation.sessionID = sessionID
+  const title = input.title ?? titleOf(input.task)
+  const entry: RosterEntry = {
+    sessionID,
+    parentID,
+    title: prepared.title || title,
+    directory: prepared.directory,
+    isolated: prepared.worktree !== undefined,
+    createdAt: ports.now(),
+    reports: "status",
+    nodeId: peer,
+    workName,
+    ...(prepared.worktree ? { source: input.directory, project: prepared.project } : {}),
+    ...(prepared.base ? { base: prepared.base } : {}),
+    ...(group ? { group } : {}),
+  }
+  const { rosterError, groupError } = await enrol(ports, entry, group)
+  ports.roles.delete(parentID)
+  if (rosterError || groupError) {
+    await childStore(ports.storage).remove(parentID, entry.sessionID).catch(() => undefined)
+    throw new Error(`remote child was prepared but not started because ${rosterError ?? groupError}; no task was sent`)
+  }
+  await handOverRemote(ports, peer, entry, admitted.depth, input.task, workName, prepared)
+  return {
+    sessionID: entry.sessionID,
+    directory: entry.directory,
+    workName,
+    ...(group && !rosterError && !groupError ? { group } : {}),
+    ...(rosterError ? { rosterError } : {}),
+    ...(groupError ? { groupError } : {}),
+  }
+}
+
+async function handOverRemote(
+  ports: CourierPorts,
+  peer: string,
+  entry: RosterEntry,
+  depth: number,
+  task: string,
+  workName: string,
+  prepared: PreparedRemote,
+) {
+  const children = childStore(ports.storage)
+  await children.prompted(entry.sessionID, ports.now()).catch(() => undefined)
+  try {
+    await remoteRequest(ports, peer, "start", {
+      sessionID: prepared.sessionID,
+      parentID: qualify(ports.remote!.nodeId, entry.parentID),
+      title: entry.title,
+      task,
+      workName,
+      depth,
+    })
+  } catch (error) {
+    await children.settled(entry.sessionID, "failed", ports.now()).catch(() => undefined)
+    if (entry.group)
+      await leaveGroup(groupStore(ports.storage), entry.parentID, entry.group, entry.sessionID, "failed", ports.now()).then(
+        (complete) => complete && ports.nudge(),
+        (leaveError: unknown) => ports.log(`courier_spawn: ${entry.sessionID} could not leave group ${entry.group}: ${String(leaveError)}`),
+      )
+    throw error
   }
 }
 

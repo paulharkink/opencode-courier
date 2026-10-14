@@ -12,9 +12,10 @@ const STATUS_LIST = `${STATUSES.slice(0, -1).join(", ")} or ${STATUSES.at(-1)}`
 export const childBranch = (sessionID: string) => `courier/${sessionID}`
 
 /** What a spawned session at `depth` is told; `depth` 1 is a child of a session nobody spawned. `branch` is for an isolated one. */
-export function childBrief(parentID: string, task: string, depth: number, limits: Limits, branch?: string) {
+export function childBrief(parentID: string, task: string, depth: number, limits: Limits, branch?: string, workName?: string) {
   return [
     `You were started by session ${parentID} through opencode-courier.`,
+    ...(workName ? [`Work assignment: ${workName}. Keep this name in progress messages and your final report.`] : []),
     "",
     `When you finish, send exactly one report: call courier_send with sessionID "${parentID}", a short account of what you did and ` +
       "status done, partial (say what is left and why) or failed (say what went wrong). Add artifacts where there are any: " +
@@ -23,7 +24,12 @@ export function childBrief(parentID: string, task: string, depth: number, limits
       "concrete ask, then end your turn and wait for its answer; never end quietly.",
     "A report with a status wakes the parent and is the only way it hears from you, so do not end without sending one. " +
       "A message without a status is progress, not your report: if you end your turn without a report, the parent is told so.",
-    "If you need the person to decide something, use your question tool; it reaches them through the session that started you.",
+    ...(workName
+      ? [
+          "You are a remote work session. Do not start Courier children; ask the Head Unit to dispatch any work in another repository.",
+          "Permission prompts and question dialogs stay on this node. If you need a decision from the Head Unit, send status blocked and wait for its Courier reply.",
+        ]
+      : ["If you need the person to decide something, use your question tool; it reaches them through the session that started you."]),
     "",
     ...(branch ? [...isolationRule(branch, depth < limits.maxDepth), ""] : []),
     ...splitRule(parentID, depth, limits),
@@ -140,6 +146,7 @@ export function reportBody(message: string, artifacts: Artifacts | undefined) {
 export function spawnText(child: {
   readonly sessionID: string
   readonly directory: string
+  readonly workName?: string
   readonly group?: string
   readonly rosterError?: string
   readonly groupError?: string
@@ -159,7 +166,7 @@ export function spawnText(child: {
       "or a failed turn still reaches you at once."
     : "It will report back with courier_send, which starts a new turn for you."
   return (
-    `Started session ${child.sessionID} in ${child.directory}. ${reports} Once you have started every session you need, ` +
+    `Started session ${child.sessionID} in ${child.directory}${child.workName ? ` for workName "${child.workName}"` : ""}. ${reports} Once you have started every session you need, ` +
     `end your turn: reply without calling more tools. That does not drop the task; you carry on with it when the reports arrive.${warning}`
   )
 }

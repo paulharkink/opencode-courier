@@ -4,6 +4,7 @@ import { standingOf } from "./domain.js"
 import type { CourierPorts, RosterEntry } from "./ports.js"
 import { current } from "./roster.js"
 import { groupStore } from "./store.js"
+import { remoteRequest, remoteTarget } from "../platform/remote.js"
 
 type Context = Plugin.Context
 
@@ -17,6 +18,11 @@ export interface ChildrenInput {
 
 /** A one-off look at a session, for check-ins; not meant to be called in a loop. */
 export async function status(ports: CourierPorts, input: StatusInput) {
+  const remote = remoteTarget(ports, input.sessionID)
+  if (remote) {
+    const result = await remoteRequest<Record<string, any>>(ports, remote.nodeId, "status", { sessionID: remote.sessionID })
+    return { ...result, sessionID: input.sessionID }
+  }
   const [info, messages, pending] = await Promise.all([
     ports.session.get({ sessionID: input.sessionID }),
     ports.session.context({ sessionID: input.sessionID }),
@@ -55,9 +61,16 @@ export async function listChildren(ports: CourierPorts, parentID: string) {
 /** One roster entry as courier_children shows it: what courier_status reports with its directory and group standing, or the error it gave. */
 export async function described(ports: CourierPorts, entry: RosterEntry) {
   const group = entry.group ? { group: { name: entry.group, report: await standingIn(ports, entry, entry.group) } } : {}
-  const roster = { directory: entry.directory, isolated: entry.isolated, created: entry.createdAt, ...group }
+  const roster = {
+    directory: entry.directory,
+    isolated: entry.isolated,
+    created: entry.createdAt,
+    ...(entry.nodeId ? { nodeId: entry.nodeId } : {}),
+    ...(entry.workName ? { workName: entry.workName } : {}),
+    ...group,
+  }
   try {
-    return { ...(await status(ports, { sessionID: entry.sessionID })), ...roster }
+    return { ...(await status(ports, { sessionID: entry.sessionID })), sessionID: entry.sessionID, ...roster }
   } catch (error) {
     return {
       sessionID: entry.sessionID,

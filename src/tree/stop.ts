@@ -5,6 +5,7 @@ import type { CleanupResult, StopPorts } from "./ports.js"
 import { childStore } from "./store.js"
 import { subtree, type Below } from "./subtree.js"
 import { stoppedNotice } from "./text.js"
+import { remoteRequest, remoteTarget } from "../platform/remote.js"
 
 export interface StopInput {
   readonly sessionID: string
@@ -103,7 +104,10 @@ async function interrupt(ports: StopPorts, { entry, depth }: Below): Promise<Sto
   const { sessionID, title } = entry
   const { storage, session, now } = ports.courier
   try {
-    const { interrupted } = await session.interrupt({ sessionID })
+    const remote = remoteTarget(ports.courier, sessionID)
+    const { interrupted } = remote
+      ? await remoteRequest<{ interrupted: boolean }>(ports.courier, remote.nodeId, "interrupt", { sessionID: remote.sessionID })
+      : await session.interrupt({ sessionID })
     // The event for it says so too; noted here as well, so the end is settled when this returns.
     if (interrupted) await childStore(storage).settled(sessionID, "interrupted", now()).catch(() => undefined)
     return { sessionID, title, depth, outcome: interrupted ? "interrupted" : "idle" }

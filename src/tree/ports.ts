@@ -5,6 +5,7 @@
 import type { Plugin } from "@opencode/plugin"
 import type { Status } from "../kernel/protocol.js"
 import type { Storage } from "../platform/storage.js"
+import type { RemoteConfig } from "../platform/remote.js"
 import type { Limits, Member, RosterEntry } from "./domain.js"
 
 export type { Artifacts, HeldReport, LeftMember, Limits, Member, RosterEntry, Standing } from "./domain.js"
@@ -148,6 +149,7 @@ export interface CourierPorts {
   readonly limits: Limits
   /** The `nativeChildren` option: a child started without isolate is created with OpenCode's own `parentID`. */
   readonly nativeChildren?: boolean
+  readonly remote?: RemoteConfig
   readonly gate: SpawnGate
   /** The depths the `context` hook remembers; a parent's is dropped when it starts a child. */
   readonly roles: Map<string, number | null>
@@ -202,6 +204,7 @@ export interface LimitPorts {
   readonly session: Pick<Context["session"], "get">
   readonly limits: Limits
   readonly gate: SpawnGate
+  readonly remote?: RemoteConfig
 }
 
 /** What courier_cleanup did: removed the worktree, found it gone, kept it and why, or forgot a child with none; `group`, one it dropped the child from. */
@@ -229,6 +232,7 @@ export interface WorktreeState {
 
 export interface CleanupPorts {
   readonly storage: RosterStorage
+  readonly remote?: RemoteConfig
   readonly worktree: Pick<Context["worktree"], "remove">
   /** The project of the plugin's location, for roster entries recorded before they carried their project. */
   readonly projectID: string

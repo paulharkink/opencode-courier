@@ -5,6 +5,7 @@ import { Effect } from "effect"
 import { randomUUID } from "node:crypto"
 import { watchFromHub } from "./platform/events.js"
 import { hub, openInProcess, permissions as domains, sharedState, type Member, type TickJob } from "./platform/hub.js"
+import { readRemoteConfig } from "./platform/remote.js"
 import { builtVersions, versionNotice } from "./platform/version.js"
 import { addSchedulingTools, cancelScheduled, dueJob, isScheduled, type LaterPorts } from "./scheduling/index.js"
 import {
@@ -30,6 +31,7 @@ import {
   deliverReleased,
   dirtyOf,
   headOf,
+  handleRemote,
   inspectWorktree,
   pruneExpired,
   readLimits,
@@ -117,11 +119,18 @@ export const courier = () => Plugin.define({
     }
     const { limits, problems } = readLimits(ctx.options)
     const { nativeChildren, problems: nativeProblems } = readNativeChildren(ctx.options)
+    let remote: ReturnType<typeof readRemoteConfig>
+    try {
+      remote = readRemoteConfig(ctx.options)
+    } catch (error) {
+      log(`courier remote nodes: not configured: ${error instanceof Error ? error.message : String(error)}`)
+    }
     for (const problem of [...problems, ...nativeProblems]) log(`courier: ${problem}`)
     const roles = new Map<string, number | null>()
     const ports: CourierPorts = {
       limits,
       nativeChildren,
+      ...(remote ? { remote } : {}),
       gate,
       roles,
       nudge,
@@ -152,7 +161,13 @@ export const courier = () => Plugin.define({
       newID: () => `later_${randomUUID()}`,
       log,
     }
-    const hooks: WebhookPorts = { storage: ctx.storage, session: ctx.session, now: Date.now, log: later.log }
+    const hooks: WebhookPorts = {
+      storage: ctx.storage,
+      session: ctx.session,
+      now: Date.now,
+      log: later.log,
+      ...(remote ? { remote: { config: remote, handle: (request) => handleRemote(ports, cleanupPorts, request) } } : {}),
+    }
     let webhook: WebhookConfig | undefined
     try {
       webhook = readConfig(ctx.options)
