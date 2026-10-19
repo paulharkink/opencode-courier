@@ -14,6 +14,10 @@ HEAD_PORT=${COURIER_HEAD_PORT:-4720}
 WORKER_PORT=${COURIER_WORKER_PORT:-4721}
 HEAD_HOOK_PORT=${COURIER_HEAD_HOOK_PORT:-4722}
 WORKER_HOOK_PORT=${COURIER_WORKER_HOOK_PORT:-4723}
+REMOTE_WORKER=${COURIER_REMOTE_WORKER:-dsowks132}
+REMOTE_WORKTREE_ROOT=${COURIER_REMOTE_WORKTREE_ROOT:-/home/pharkink/.local/share/courier-cross-node-demo/data/opencode/worktree}
+REMOTE_SOURCE_ROOT=${COURIER_REMOTE_SOURCE_ROOT:-/home/pharkink/.local/share/courier-cross-node-demo/workspace/worker-source}
+REMOTE_ATTACH=${COURIER_REMOTE_ATTACH:-/home/pharkink/.local/share/courier-cross-node-demo/bin/attach-tui}
 
 die() { echo "remote demo: $*" >&2; exit 1; }
 need_private_runtime() {
@@ -32,6 +36,9 @@ node_env() {
   export OPENCODE_SERVER_PASSWORD
   OPENCODE_SERVER_PASSWORD=$(cat "$BASE/$role/secrets/server-password")
   export OPENCODE_PASSWORD=$OPENCODE_SERVER_PASSWORD
+  # Peer HTTP must go directly over the tailnet, never through a corporate proxy.
+  export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,100.84.15.57,100.102.197.40"
+  export no_proxy=$NO_PROXY
 }
 node_url() { [ "$1" = head ] && echo "http://127.0.0.1:$HEAD_PORT" || echo "http://127.0.0.1:$WORKER_PORT"; }
 repo_root() { cat "$BASE/repositories.path"; }
@@ -174,8 +181,7 @@ EOF
 }
 
 question_prompt() {
-  local worker_dir
-  worker_dir=$(repo_dir worker)
+  local worker_dir=${REMOTE_SOURCE_ROOT:-$(repo_dir worker)}
   cat <<EOF
 Use courier_spawn exactly once with peer "worker", directory "$worker_dir", workName "remote-question-answer", and isolate true. Do not do the file work yourself. Explain that isolate=true creates a new Worker-side Git worktree: the actual returned worktree directory is canonical and can differ from the source repository directory, so the Worker should use its assigned worktree.
 
@@ -295,6 +301,32 @@ watch_child() {
   exec "$OC" --server "$(node_url worker)" --session "$child_bare"
 }
 
+watch_remote_child() {
+  need_private_runtime
+  local parent=${2:-} parent_file="$BASE/head/current-session" messages child_record child child_dir child_bare errors
+  [ -n "$parent" ] || { [ -r "$parent_file" ] && parent=$(cat "$parent_file"); }
+  [ -n "$parent" ] || die "Head session ID missing; run head-tui-new first or pass it explicitly"
+  case "$parent" in ses_*) ;; *) die "expected an unqualified Head session ID" ;; esac
+  echo "Watching the Mac Head session for a WSL Worker; no messages will be sent."
+  for _ in $(seq 1 900); do
+    messages=$(api_get head "session/$parent/message" 2>/dev/null || true)
+    if [ -n "$messages" ]; then
+      errors=$(jq -r '[.data[] | select(.type == "assistant") | .content[]? | select(.type == "tool" and .state.status == "error")] | length' <<<"$messages")
+      [ "$errors" = 0 ] || die "Head Unit tool call failed; inspect private API history for $parent"
+      child_record=$(jq -r '[.data[] | select(.type == "assistant") | .content[]? | select(.type == "tool" and .name == "courier_spawn" and .state.status == "completed") | .state.metadata | [.sessionID, .directory] | @tsv] | first // empty' <<<"$messages")
+      [ -n "$child_record" ] && break
+    fi
+    sleep 1
+  done
+  [ -n "${child_record:-}" ] || die "no remote child was created within 15 minutes"
+  IFS=$'\t' read -r child child_dir <<<"$child_record"
+  case "$child" in worker/ses_*) ;; *) die "spawn returned an unexpected WSL Worker session reference" ;; esac
+  case "$child_dir" in "$REMOTE_WORKTREE_ROOT"/*) ;; *) die "spawn returned a worktree outside the private WSL Worker root" ;; esac
+  child_bare=${child#worker/}
+  echo "Attaching to WSL session $child in its returned worktree."
+  exec ssh -tt "$REMOTE_WORKER" "$REMOTE_ATTACH" "$child_bare" "$child_dir"
+}
+
 verify_live() {
   need_private_runtime
   local parent=${2:-} parent_file="$BASE/head/current-session" messages child_record child child_dir parent_json child_json worker_reports head_text worker_text invalid false_failure marker report_branch report_commit actual_commit evidence
@@ -375,6 +407,12 @@ case "${1:-}" in
     echo "Worker repository: $(repo_dir worker)"
     echo "Both nodes initialized with isolated private state."
     ;;
+  start-head)
+    need_private_runtime
+    [ -d "$(repo_dir head)/.git" ] || die "run setup first"
+    start_node head
+    echo "Mac Head service ready at $(node_url head) (remote listener port $HEAD_HOOK_PORT)."
+    ;;
   serve)
     need_private_runtime
     [ -d "$(repo_dir head)/.git" ] || die "run setup first"
@@ -412,6 +450,7 @@ case "${1:-}" in
     ;;
   head-tui-new) head_tui_new ;;
   watch-child) watch_child "$@" ;;
+  watch-remote-child) watch_remote_child "$@" ;;
   verify-live) verify_live "$@" ;;
-  *) die "usage: $0 {build|setup|start|serve|status|prompt|question-prompt|rehearse|head-tui-new|watch-child [head-session-id]|verify-live [head-session-id]|stop|tui [head-session-id]|reset}" ;;
+  *) die "usage: $0 {build|setup|start|start-head|serve|status|prompt|question-prompt|rehearse|head-tui-new|watch-child [head-session-id]|watch-remote-child [head-session-id]|verify-live [head-session-id]|stop|tui [head-session-id]|reset}" ;;
 esac

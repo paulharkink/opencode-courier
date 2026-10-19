@@ -332,6 +332,7 @@ test("tool inputs decode with their schemas", async () => {
   expect(decode("courier_spawn", { task: "t", isolate: true })).toEqual({ task: "t", isolate: true })
   expect(decode("courier_spawn", { task: "t", group: "reviews" })).toEqual({ task: "t", group: "reviews" })
   expect(decode("courier_send", { sessionID: "s", message: "m" })).toEqual({ sessionID: "s", message: "m" })
+  expect(decode("courier_send", { sessionID: "s", message: "m", status: null })).toEqual({ sessionID: "s", message: "m", status: null })
   expect(() => decode("courier_send", { sessionID: "s" })).toThrow()
   const report = { sessionID: "s", message: "m", status: "done", artifacts: { branch: "b", commits: ["c"], files: ["f"], checks: [{ command: "bun test", result: "ok" }] } }
   expect(decode("courier_send", report)).toEqual(report)
@@ -556,10 +557,13 @@ test("courier_send signs the message with the calling session, and carries the s
 
   await tools.get("courier_send").execute({ sessionID: "ses_parent", message: "done" }, { sessionID: "ses_child" })
   const result = await tools.get("courier_send").execute({ sessionID: "ses_parent", message: "done", status: "done" }, { sessionID: "ses_child" })
+  await tools.get("courier_send").execute({ sessionID: "ses_parent", message: "done", status: null }, { sessionID: "ses_child" })
 
   expect(calls[0]!.input.metadata).toEqual({ source: "courier", from: "ses_child" })
   expect(calls[1]!.input.metadata).toEqual({ source: "courier", from: "ses_child", status: "done" })
   expect(calls[1]!.input.text).toStartWith('<courier from="ses_child" status="done">')
+  expect(calls[2]!.input.metadata).toEqual({ source: "courier", from: "ses_child" })
+  expect(calls[2]!.input.text).toStartWith('<courier from="ses_child">')
   expect(result.metadata).toEqual({ messageID: "msg_2", status: "done" })
 })
 

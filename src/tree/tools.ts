@@ -45,7 +45,7 @@ export const SendInput = Schema.Struct({
   sessionID: Schema.String.annotate({ description: "The session to deliver to." }),
   message: Schema.String.annotate({ description: "The message text." }),
   status: Schema.optional(
-    Schema.Literals(STATUSES).annotate({
+    Schema.NullOr(Schema.Literals(STATUSES)).annotate({
       description:
         "For a report to the session that started you: done, partial (some of the task is left), blocked (you need a " +
         "decision from it; say what) or failed. A message without a status is progress, not your report.",
@@ -146,7 +146,7 @@ export function addTreeTools(tools: ToolEditor, ports: TreeToolPorts) {
       "reports; the result says so, and nothing more is needed from you.",
     input: SendInput,
     execute: async (input, context) => {
-      const delivered = await send(ports.courier, context.sessionID, input).catch(rethrow("courier_send"))
+      const delivered = await send(ports.courier, context.sessionID, { ...input, status: input.status ?? undefined }).catch(rethrow("courier_send"))
       return { content: sendText(input.sessionID, delivered), metadata: delivered }
     },
   })

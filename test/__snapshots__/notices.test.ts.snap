@@ -295,14 +295,21 @@ exports[`tools courier_send 1`] = `
       "status": {
         "anyOf": [
           {
-            "description": "For a report to the session that started you: done, partial (some of the task is left), blocked (you need a decision from it; say what) or failed. A message without a status is progress, not your report.",
-            "enum": [
-              "done",
-              "partial",
-              "blocked",
-              "failed",
+            "anyOf": [
+              {
+                "enum": [
+                  "done",
+                  "partial",
+                  "blocked",
+                  "failed",
+                ],
+                "type": "string",
+              },
+              {
+                "type": "null",
+              },
             ],
-            "type": "string",
+            "description": "For a report to the session that started you: done, partial (some of the task is left), blocked (you need a decision from it; say what) or failed. A message without a status is progress, not your report.",
           },
           {
             "type": "null",
