@@ -146,6 +146,8 @@ export function reportBody(message: string, artifacts: Artifacts | undefined) {
 export function spawnText(child: {
   readonly sessionID: string
   readonly directory: string
+  readonly sourceDirectory?: string
+  readonly isolated?: boolean
   readonly workName?: string
   readonly group?: string
   readonly rosterError?: string
@@ -165,8 +167,11 @@ export function spawnText(child: {
       "turn has ended, you get their reports in one message, which starts a new turn for you; a blocked report, a question " +
       "or a failed turn still reaches you at once."
     : "It will report back with courier_send, which starts a new turn for you."
+  const location = child.isolated && child.sourceDirectory
+    ? `in isolated worktree ${child.directory}, based on source directory ${child.sourceDirectory}. Do file work in the worktree at ${child.directory}; changes stay separate from the source directory until you merge them.`
+    : `in ${child.directory}`
   return (
-    `Started session ${child.sessionID} in ${child.directory}${child.workName ? ` for workName "${child.workName}"` : ""}. ${reports} Once you have started every session you need, ` +
+    `Started session ${child.sessionID} ${location}${child.workName ? ` for workName "${child.workName}"` : ""}. ${reports} Once you have started every session you need, ` +
     `end your turn: reply without calling more tools. That does not drop the task; you carry on with it when the reports arrive.${warning}`
   )
 }

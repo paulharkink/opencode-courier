@@ -23,7 +23,8 @@ export const SpawnInput = Schema.Struct({
     Schema.Boolean.annotate({ description:
         "Run the session in its own git worktree so parallel sessions don't share files. From a session that is itself " +
         "isolated, the worktree starts from your current commit, not your uncommitted changes: commit first. The session " +
-        "commits on a branch named courier/<its session ID> and names it in its report; merge that branch yourself.",
+        "commits on a branch named courier/<its session ID> and names it in its report; merge that branch yourself. " +
+        "For a remote spawn, the result gives both the selected source directory and the child's actual worktree directory; do file work in the latter.",
     }),
   ),
   group: Schema.optional(
@@ -36,7 +37,7 @@ export const SpawnInput = Schema.Struct({
     }),
   ),
   peer: Schema.optional(Schema.String.annotate({ description: "Configured remote node to run the session on." })),
-  directory: Schema.optional(Schema.String.annotate({ description: "Absolute directory on the peer, inside its allowed roots; required for a remote spawn." })),
+  directory: Schema.optional(Schema.String.annotate({ description: "Absolute source directory on the peer, inside its allowed roots; required for a remote spawn. With isolate: true, the child works in its own worktree, whose actual directory is returned separately." })),
   workName: Schema.optional(Schema.String.annotate({ description: "Short name for this assignment; required for a remote spawn and shared by both rosters." })),
 })
 
@@ -123,7 +124,7 @@ export function addTreeTools(tools: ToolEditor, ports: TreeToolPorts) {
       "be woken once, with all their reports, instead of once per report. DO NOT poll it or call courier_status in a " +
       "loop: once you have started the sessions you need, end your turn by replying without calling more tools; each " +
       "report, or each group's reports, starts a new turn in which you carry on. For a remote session, give its configured " +
-      "peer, an absolute directory on that node and a short workName; its stable ID is nodeId/sessionID and it reports to you across nodes. " +
+      "peer, an absolute source directory on that node and a short workName; with isolate: true, the result identifies the actual worktree separately. Its stable ID is nodeId/sessionID and it reports to you across nodes. " +
       "For long tasks, also courier_later a " +
       "check-in for yourself in case it never reports, and courier_cancel it when it does.",
     input: SpawnInput,

@@ -117,6 +117,8 @@ async function startRemote(ports: CourierPorts, parentID: string, input: SpawnIn
   return {
     sessionID: entry.sessionID,
     directory: entry.directory,
+    sourceDirectory: input.directory,
+    isolated: entry.isolated,
     workName,
     ...(group && !rosterError && !groupError ? { group } : {}),
     ...(rosterError ? { rosterError } : {}),

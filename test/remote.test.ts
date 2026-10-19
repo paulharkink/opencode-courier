@@ -7,6 +7,7 @@ import { receive } from "../src/webhook/receiver.js"
 import type { WebhookPorts } from "../src/webhook/subscriptions.js"
 import { handleRemote } from "../src/tree/peer.js"
 import { spawn } from "../src/tree/spawn.js"
+import { spawnText } from "../src/tree/text.js"
 import { DEFAULT_LIMITS } from "../src/tree/domain.js"
 import { childStore, rosterKey, settledKey } from "../src/tree/store.js"
 
@@ -242,6 +243,51 @@ describe("remote node configuration and addresses", () => {
       await expect(spawn(ports, "ses_parent", { task: "do the work", peer: "worker", directory: root, workName: "docs" }))
         .rejects.toThrow("prepared but not started")
       expect(operations).toEqual(["prepare"])
+    } finally {
+      globalThis.fetch = priorFetch
+    }
+  })
+
+  test("reports the selected source separately from an isolated remote session's actual directory", async () => {
+    const root = mkdtempSync(join(tmpdir(), "courier-remote-"))
+    const secretFile = join(root, "shared.key")
+    writeFileSync(secretFile, "pairwise secret")
+    const remote = readRemoteConfig({ remoteNodes: { nodeId: "head", peers: { worker: { url: "http://worker:4098", secretFile } } } })!
+    const values = new Map<string, unknown>()
+    const worktree = join(root, "worker-data", "worktree", "hidden-rocket")
+    const operations: string[] = []
+    const priorFetch = globalThis.fetch
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body))
+      operations.push(request.operation)
+      return new Response(JSON.stringify({ result: request.operation === "prepare"
+        ? { sessionID: "ses_prepared", directory: worktree, worktree, project: "worker-project", title: "task" }
+        : { ready: true } }), { status: 200 })
+    }) as typeof fetch
+    const ports: any = {
+      remote,
+      storage: {
+        get: async (key: string) => values.get(key),
+        set: async (key: string, value: unknown) => void values.set(key, value),
+        remove: async (key: string) => void values.delete(key),
+        scan: async ({ prefix }: any) => ({ entries: [...values].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })) }),
+      },
+      session: { get: async () => ({ id: "ses_parent" }) },
+      directory: root,
+      projectID: "head-project",
+      now: () => 1,
+      limits: DEFAULT_LIMITS,
+      gate: { reserved: new Set(), turn: Promise.resolve() },
+      roles: new Map(),
+      nudge: () => {},
+      log: () => {},
+    }
+    try {
+      const child = await spawn(ports, "ses_parent", { task: "create the marker", peer: "worker", directory: root, workName: "marker", isolate: true })
+      expect(child).toMatchObject({ sessionID: "worker/ses_prepared", directory: worktree, sourceDirectory: root, isolated: true })
+      expect(spawnText(child)).toContain(`isolated worktree ${worktree}, based on source directory ${root}`)
+      expect(spawnText(child)).toContain(`Do file work in the worktree at ${worktree}`)
+      expect(operations).toEqual(["prepare", "start"])
     } finally {
       globalThis.fetch = priorFetch
     }
