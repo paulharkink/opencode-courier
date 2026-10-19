@@ -5,7 +5,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BASE=${COURIER_DEMO_HOME:-"$(cd "$ROOT/.." && pwd)/.opencode-courier-demo"}
-RUNTIME=${COURIER_DEMO_RUNTIME:-/Users/pharkink/sources/.opencode-courier-demo/runtime}
+RUNTIME=${COURIER_DEMO_RUNTIME:-/Users/pharkink/sources/.opencode-courier-demo/runtime-2.0.32}
 OC="$RUNTIME/node_modules/.bin/opencode"
 NODE=${COURIER_DEMO_NODE:-/Users/pharkink/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node}
 BUN=${COURIER_DEMO_BUN:-$RUNTIME/node_modules/@oven/bun-darwin-aarch64/bin/bun}
@@ -170,6 +170,16 @@ isolate=true intentionally creates a new Worker-side Git worktree. The actual re
 Assign the worker this sequence: (1) use the parent session ID from the child brief to call courier_send to the parent with message exactly REMOTE_DEMO_PROGRESS_42 and no status, so it is progress; (2) schedule a message to itself with courier_later for 0.5 minutes from now, saying "finish the marker and report done", then end the turn without further tool calls; (3) only after that scheduled wake, create REMOTE-DEMO-MARKER.txt in the actual assigned worktree with exactly COURIER_REMOTE_DEMO_OK_42 and commit it on a named branch; use the available file-edit tool or a shell call with its required command string, not a patch payload sent to shell; (4) report to the parent with courier_send status done, message exactly REMOTE_DEMO_DONE_42, and artifacts.branch, artifacts.commits, and artifacts.files containing the branch, commit, and REMOTE-DEMO-MARKER.txt. Do no other file work. If a tool call errors, do not claim success.
 
 After the progress report arrives, reply exactly HEAD_UNIT_PROGRESS_SEEN_42 and end your turn. After the done report arrives, reply exactly HEAD_UNIT_WOKE_ON_REMOTE_REPORT_42.
+EOF
+}
+
+question_prompt() {
+  local worker_dir
+  worker_dir=$(repo_dir worker)
+  cat <<EOF
+Use courier_spawn exactly once with peer "worker", directory "$worker_dir", workName "remote-question-answer", and isolate true. Do not do the file work yourself. Explain that isolate=true creates a new Worker-side Git worktree: the actual returned worktree directory is canonical and can differ from the source repository directory, so the Worker should use its assigned worktree.
+
+Assign the Worker to create a new file named REMOTE-DEMO-ANSWER.json containing a JSON object with an "answer" string field. Do not put the answer value in the assignment. Before changing files, the Worker must use courier_send with status=blocked to ask you what exact string value to use for "answer", then end its turn and wait. When that blocked question arrives, send the value HEAD_ONLY_REPLY_2026-10-19 to the same qualified Worker session using courier_send, then wait. After the Worker wakes, creates valid JSON with your answer, commits it on its existing branch, and reports status=done with branch, commit, and file artifact, acknowledge its completion. Do not poll or send any other Worker messages. If any tool call errors, do not claim success. Worker shell calls must include the required command field; never send patch payloads to shell.
 EOF
 }
 
@@ -377,6 +387,7 @@ case "${1:-}" in
     ;;
   rehearse) rehearse ;;
   prompt) demo_prompt ;;
+  question-prompt) question_prompt ;;
   status)
     for role in head worker; do
       if api_ok "$role" info; then echo "$role: healthy $(node_url "$role")"; else echo "$role: stopped or unhealthy"; fi
@@ -402,5 +413,5 @@ case "${1:-}" in
   head-tui-new) head_tui_new ;;
   watch-child) watch_child "$@" ;;
   verify-live) verify_live "$@" ;;
-  *) die "usage: $0 {build|setup|start|serve|status|prompt|rehearse|head-tui-new|watch-child [head-session-id]|verify-live [head-session-id]|stop|tui [head-session-id]|reset}" ;;
+  *) die "usage: $0 {build|setup|start|serve|status|prompt|question-prompt|rehearse|head-tui-new|watch-child [head-session-id]|verify-live [head-session-id]|stop|tui [head-session-id]|reset}" ;;
 esac
