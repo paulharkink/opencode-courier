@@ -89,6 +89,37 @@ export interface ChildStore {
   dropReported(keys: ReadonlyArray<string>): Promise<void>
 }
 
+/**
+ * A courier message waiting in a session's inbox, watched until it is delivered: `running` while the session runs a
+ * turn, which takes it at its next step; `idleAt` since the session was last seen idle with it waiting.
+ */
+export interface Wake {
+  readonly sessionID: string
+  readonly inboxID: string
+  /** When OpenCode enqueued it. */
+  readonly at: number
+  /** Its text and description, which waking the session again sends under the same inbox id. */
+  readonly text: string
+  readonly description?: string
+  readonly running: boolean
+  readonly idleAt?: number
+  /** When the scheduler woke the session again, the message still waiting. */
+  readonly rewoken?: number
+  /** When the session was found still not woken after that: it is stalled. */
+  readonly stalled?: number
+}
+
+export interface WakeStore {
+  /** Writes a watched message, replacing what was kept of it. */
+  put(wake: Wake): Promise<void>
+  /** The messages watched in a session's inbox. */
+  of(sessionID: string): Promise<Wake[]>
+  /** Every message watched. */
+  all(): Promise<Wake[]>
+  /** Stops watching a message: delivered, cancelled, or its session gone. */
+  remove(sessionID: string, inboxID: string): Promise<void>
+}
+
 /** A member of a join group with where it is kept. */
 export interface Membership extends Member {
   readonly parentID: string
@@ -146,6 +177,10 @@ export interface CourierPorts {
   readonly now: () => number
   /** The permission requests and questions a session waits on, wherever they are pending. */
   readonly pending: (sessionID: string) => Promise<ReadonlyArray<Pending>>
+  /** The forms a session shows, which only the person can answer: web search's, a plugin's; not the question tool's. */
+  readonly forms: (sessionID: string) => Promise<ReadonlyArray<ShownForm>>
+  /** The context windows of the models available, by provider and model id, as the panel reads a session's context use. */
+  readonly windows: () => Promise<ReadonlyArray<ModelWindow>>
   readonly limits: Limits
   /** The `nativeChildren` option: a child started without isolate is created with OpenCode's own `parentID`. */
   readonly nativeChildren?: boolean
@@ -156,6 +191,19 @@ export interface CourierPorts {
   /** Has the scheduler deliver what is due now rather than at its next tick: a group a report has just completed. */
   readonly nudge: () => void
   readonly log: (message: string) => void
+}
+
+/** A model's context window in tokens, as `CourierPorts.windows` lists it. */
+export interface ModelWindow {
+  readonly providerID: string
+  readonly id: string
+  readonly context: number
+}
+
+/** A form a session shows, as `CourierPorts.forms` lists it; `person/` keeps them. */
+export interface ShownForm {
+  readonly id: string
+  readonly title: string
 }
 
 /** One question a session waits on, as `Pending` shows it; `person/`'s `Prompt` has these fields. */
@@ -266,8 +314,8 @@ export interface ExecutionError {
 
 export interface WatchPorts {
   readonly storage: RosterStorage
-  /** `context` reads the last reply of a session that ended its turn without reporting. */
-  readonly session: Pick<Context["session"], "synthetic" | "context">
+  /** `context` reads the last reply of a session that ended its turn without reporting; `get` is what every member joins with too. */
+  readonly session: Pick<Context["session"], "synthetic" | "context" | "get">
   readonly event: Pick<Context["event"], "subscribe">
   /** The permission domains of every loaded location, which the `Waits` suppliers ask; an isolated child's are in its worktree's. */
   readonly permissions: () => Iterable<Pick<Context["permission"], "list">>
@@ -299,5 +347,7 @@ export interface ContextPorts {
   readonly limits: Limits
   /** Each session's depth once looked up: null for one nobody spawned that has started none, until it starts one. */
   readonly roles: Map<string, number | null>
+  /** Tools of other modules hidden from a leaf alongside courier_spawn; `src/index.ts` names courier_recall and courier_note. */
+  readonly hiddenFromLeaf?: ReadonlyArray<string>
   readonly log: (message: string) => void
 }

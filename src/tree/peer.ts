@@ -8,6 +8,7 @@ import { childBrief, childBranch } from "./text.js"
 import { status } from "./status.js"
 import { cleanup } from "./cleanup.js"
 import { send } from "./send.js"
+import { forgetWakes } from "./wake.js"
 
 const MAX_TASK = 40_000
 const WORK_NAME = /^[^\r\n]{1,120}$/
@@ -27,6 +28,7 @@ export async function handleRemote(ports: CourierPorts, cleanupPorts: CleanupPor
     case "interrupt": {
       const sessionID = requiredString(input.sessionID, "sessionID")
       await childOwnedBy(ports, request.sender, sessionID)
+      await forgetWakes(ports, sessionID).catch((error: unknown) => ports.log(`courier_stop: could not drop the wake watch of ${sessionID}: ${String(error)}`))
       return ports.session.interrupt({ sessionID })
     }
     case "cleanup": {

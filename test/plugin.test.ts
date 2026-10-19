@@ -64,6 +64,7 @@ async function setUp(
     event: { subscribe: events.subscribe },
     agent: { get: record("agent.get", { data: { id: "build" } }) },
     location: { directory: "/repo", project: { id: "proj_1" } },
+    model: { list: async () => ({ data: [] }) },
     session: {
       create: record("session.create", { id: "ses_child", location: { directory: "/repo" } }),
       prompt: record("session.prompt", { id: "msg_1" }),
@@ -193,15 +194,15 @@ test("on the pinned OpenCode, loading logs nothing about the version", async () 
 test("on another OpenCode, loading logs one line naming both versions, and tool calls add nothing", async () => {
   const logged = spyOn(console, "error").mockImplementation(() => {})
   try {
-    const { tools } = await setUp({}, undefined, [], { name: "opencode", version: "2.0.30", channel: "beta" })
+    const { tools } = await setUp({}, undefined, [], { name: "opencode", version: "2.0.33", channel: "beta" })
     await tools.get("courier_status").execute({ sessionID: "ses_child" }, { sessionID: "ses_parent" })
     const result = await tools.get("courier_children").execute({}, { sessionID: "ses_parent" })
 
     const { plugin, opencode } = builtVersions()
     expect(logged.mock.calls.map(([line]) => line)).toEqual([
-      `opencode-courier ${plugin} was built and tested against OpenCode ${opencode}; this server is 2.0.30 (channel beta). ` +
-        "Its tools may fail: see the Supported OpenCode version table in the README, " +
-        "https://github.com/ivopogace/opencode-courier#supported-opencode-version",
+      `opencode-courier ${plugin} was built and tested against OpenCode ${opencode}; this server is 2.0.33 (channel beta). ` +
+        "Its tools may fail: see every release and the OpenCode it is pinned to, " +
+        "https://github.com/ivopogace/opencode-courier/blob/main/docs/reference.md#the-opencode-version",
     ])
     expect(result.content).not.toContain("built and tested against")
   } finally {
@@ -225,15 +226,19 @@ test("registers the courier tools", async () => {
     "courier_cancel",
     "courier_subscribe",
     "courier_unsubscribe",
+    "courier_recall",
+    "courier_note",
   ])
 })
 
-test("registers the courier RPCs for the TUI part, the tree's and the person's, read from this location's storage", async () => {
+test("registers the courier RPCs for the TUI part, the tree's, the person's and the memory's, read from this location's storage", async () => {
   const { rpcs } = await setUp()
 
-  expect([...rpcs.keys()]).toEqual(["courier", "courier-person"])
+  expect([...rpcs.keys()]).toEqual(["courier", "courier-person", "courier-memory"])
   expect(await rpcs.get("courier")!.handlers.summary({ sessionID: "ses_none" })).toEqual({ running: 0, waiting: 0, idle: 0, groups: [] })
   expect(await rpcs.get("courier-person")!.handlers.asks({ sessionID: "ses_none" })).toEqual({ top: "ses_none", sessions: [], permissions: [], questions: [] })
+  expect(await rpcs.get("courier-memory")!.handlers.records({})).toEqual({ memory: true, projectID: expect.any(String), records: [] })
+  expect(await rpcs.get("courier-memory")!.handlers.forget({ sessionID: "ses_none" })).toEqual({ outcome: "none" })
 })
 
 test("loads all the same when the host cannot register the RPC, and logs it", async () => {
@@ -242,7 +247,7 @@ test("loads all the same when the host cannot register the RPC, and logs it", as
   try {
     const { tools, hooks } = await setUp({}, undefined, [], pinned, Promise.resolve(), { rpc: undefined })
 
-    expect(tools.size).toBe(12)
+    expect(tools.size).toBe(14)
     expect(hooks.has("context")).toBe(true)
     expect(logged.filter((line) => line.startsWith("courier rpc: not registered"))).toHaveLength(1)
   } finally {
@@ -266,10 +271,10 @@ test("registers them as direct tools, not code-mode ones only reachable through 
   for (const tool of tools.values()) expect(tool.options).toEqual({ codemode: false })
 })
 
-test("its context hook, with the limits from the options, hides courier_spawn from a child at maxDepth", async () => {
+test("its context hook, with the limits from the options, hides courier_spawn, courier_recall and courier_note from a child at maxDepth", async () => {
   const { tools, hooks } = await setUp({}, { maxDepth: 1 })
   await tools.get("courier_spawn").execute({ task: "Fix the bug" }, { sessionID: "ses_parent" })
-  const event = { sessionID: "ses_child", tools: { courier_spawn: {}, courier_send: {} }, system: [] as any[] }
+  const event = { sessionID: "ses_child", tools: { courier_spawn: {}, courier_send: {}, courier_recall: {}, courier_note: {} }, system: [] as any[] }
 
   await hooks.get("context")!(event)
 
@@ -282,11 +287,11 @@ test("its context hook, with the limits from the options, hides courier_spawn fr
 
 test("its context hook points a session nobody spawned, with no children, to the skill", async () => {
   const { hooks } = await setUp()
-  const event = { sessionID: "ses_alone", tools: { courier_spawn: {}, courier_send: {} }, system: [] as any[] }
+  const event = { sessionID: "ses_alone", tools: { courier_spawn: {}, courier_send: {}, courier_recall: {}, courier_note: {} }, system: [] as any[] }
 
   await hooks.get("context")!(event)
 
-  expect(Object.keys(event.tools)).toEqual(["courier_spawn", "courier_send"])
+  expect(Object.keys(event.tools)).toEqual(["courier_spawn", "courier_send", "courier_recall", "courier_note"])
   expect(event.system).toEqual([{ type: "text", text: rolePart(null, DEFAULT_LIMITS) }])
 })
 

@@ -15,18 +15,24 @@ export const SKILL_CONTENT = [
   "How to split a task across OpenCode sessions with opencode-courier, and bring the results back up. Your brief, or the " +
     "opencode-courier role line in your system prompt, names your depth in the session tree and its limits.",
   "",
-  "1. Decide: split or do. Split when the task has 2 or more independent, substantial parts touching separate files or " +
-    "areas; do it yourself when it is small, sequential or tightly coupled. Never start exactly one session. " +
-    "An implementation task with one tightly coupled core usually still has independent parts: its e2e scenario, its " +
+  "1. Decide: split or do. First call courier_recall once: it lists how earlier trees in this project were split and how " +
+    "each part went, so weigh that; one call, before you decide, never in a loop. Split when the task has 2 or more " +
+    "independent, substantial parts touching separate files or areas; do it yourself when it is small, sequential or tightly coupled. Never start exactly one session for the whole " +
+    "task: it only adds a hop. What you read and write yourself stays in your context for every later turn, so keep the " +
+    "deciding, checking and integrating, and hand off the long reading and writing. An implementation task with one tightly " +
+    "coupled core usually still has independent parts: finding out what the change needs (a session with isolate: false " +
+    "reads the code, or a library's or a host's source, tries things and reports what it found), its e2e scenario, its " +
     "documentation, sometimes a second test file, and a review of the core by a session with fresh context, which reads the " +
     "committed diff against the task and the repository's rules and reports its findings (isolate: false, it edits nothing). " +
-    "Weigh each of them: do the core yourself first and commit it, so that the names and texts the other parts depend on are " +
-    "fixed, then, if 2 or more remain, start one session per remaining part, in one group. A part that is itself big and " +
-    "divisible is split again by the session that gets it; at the deepest level a session does its part itself. " +
+    "Weigh each of them. When the other parts depend on names and texts the core fixes, split in stages: the core first, " +
+    "yourself when it is small or by one session when it is big, merged and committed before the rest start; then, if 2 or " +
+    "more parts remain, one session per remaining part, in one group. A part that is itself big and divisible is split again " +
+    "by the session that gets it; at the deepest level a session does its part itself. " +
     `Say which in one line of your reply, before you start: ${SPLIT_LINE}, so that a reasoned decision to do it ` +
     "yourself can be told from one never made.",
   "2. Plan the parts so that no two edit the same files. Write each task so the session can do it without you: what to " +
-    "produce and where, how to check it, what to report. Say if it may split its part further.",
+    "produce and where, how to check it, what to report. Say if it may split its part further, and to run its checks " +
+    "through the project's scripts (step 6): each permission request of a session below you wakes you and waits on the person.",
   "3. Start them: one courier_spawn per part, all with the same group name, so you are woken once with every report; " +
     "isolate: true for each part that edits files in parallel with another (commit your own work first if you are isolated " +
     "yourself). For long work, courier_later a check-in for yourself, and courier_cancel it when the reports arrive.",
@@ -44,7 +50,13 @@ export const SKILL_CONTENT = [
   "7. Integrate: merge each reported branch into your own checkout (git merge courier/<session>), resolve conflicts " +
     "yourself, run the checks once more, then courier_cleanup the isolated sessions you are done with.",
   "8. Report upward if a session started you: one courier_send to it, with one status for the whole (done only when every " +
-    "part is verified and integrated; partial, blocked or failed otherwise) and the artifacts. At the top, reply to the person.",
+    "part is verified and integrated; partial, blocked or failed otherwise) and the artifacts. At the top, before you reply " +
+    "to the person: if there is something the next tree in this project should know about running a tree like this one (how " +
+    "it was split, what a part got wrong and what caught it, what a brief should have said, what the person decided), one " +
+    "courier_note with that one line; none when there is nothing. Name the job it comes from and the reason, so that a " +
+    "lesson for one kind of job is not taken for every job; the tool refuses a line over its limit rather than clipping " +
+    "it, so write it again shorter. A rule that holds every time goes to AGENTS.md or the skill, through the person, not " +
+    "into a note. Then reply to the person.",
   "",
   "When a part goes wrong:",
   "- A failed turn (failed=\"...\") or a silent end (ended=\"without-report\", quoting the session's last reply): message " +

@@ -107,7 +107,7 @@ test("person/ outside person/question/ uses the relay through person/question/in
 })
 
 /** The modules of src/: each a folder of its own, used from outside through its index.ts. */
-const MODULES = ["tree", "person", "scheduling", "webhook"]
+const MODULES = ["tree", "person", "scheduling", "webhook", "memory"]
 
 /** The module a file of src/ is in, or undefined for `src/index.ts`, `skill.ts`, `kernel/` and `platform/`. */
 const moduleOf = (file: string) => MODULES.find((folder) => file.startsWith(`${folder}/`))
@@ -125,7 +125,7 @@ test("a module is imported from outside only through its index.ts, but by the tu
   expect(reaching).toEqual([])
 })
 
-test("the only dependency between modules is person/ on tree/", () => {
+test("the only dependencies between modules are person/'s and memory/'s on tree/", () => {
   const edges = new Set(
     [...imports()].flatMap(([module, imported]) =>
       imported.flatMap((name) => {
@@ -134,7 +134,7 @@ test("the only dependency between modules is person/ on tree/", () => {
       }),
     ),
   )
-  expect([...edges]).toEqual(["person -> tree"])
+  expect([...edges].toSorted()).toEqual(["memory -> tree", "person -> tree"])
 })
 
 test("every module imports only itself, platform/, kernel/ and the modules it may depend on", () => {
@@ -158,24 +158,29 @@ test("no file of src/ is outside a folder but index.ts, skill.ts and the rpc.ts 
 const isTuiPackage = (name: string) =>
   name === "@opencode/plugin/tui" || name.startsWith("@opencode/plugin/tui/") || name === "solid-js" || name.startsWith("solid-js/") || name.startsWith("@opentui/")
 
-test("a module's tui.tsx imports only the TUI's packages and its own module's rpc.ts and text.ts", () => {
+test("a module's tui.tsx imports only the TUI's packages and its own module's rpc.ts, text.ts and mascot.ts", () => {
   const parts = sources().filter(({ file }) => /^[^/\\]+[/\\]tui\.tsx$/.test(file)).map(({ module }) => module)
-  expect(parts).toEqual(expect.arrayContaining(["tree/tui", "person/tui"]))
+  expect(parts).toEqual(expect.arrayContaining(["tree/tui", "person/tui", "memory/tui"]))
   const graph = imports()
   const used = packages()
   const reaching = parts.flatMap((module) => {
     const own = module.slice(0, -"tui".length)
     return [
-      ...(graph.get(module) ?? []).filter((name) => name !== `${own}rpc` && name !== `${own}text`),
+      ...(graph.get(module) ?? []).filter((name) => ![`${own}rpc`, `${own}text`, `${own}mascot`].includes(name)),
       ...(used.get(module) ?? []).filter((name) => !isTuiPackage(name)),
     ].map((name) => `${module} -> ${name}`)
   })
   expect(reaching).toEqual([])
 })
 
+test("tree/mascot.ts, Digby's drawings, imports nothing, so the TUI bundle takes nothing else with it", () => {
+  expect(imports().get("tree/mascot")).toEqual([])
+  expect(packages().get("tree/mascot")).toEqual([])
+})
+
 test("a module's rpc.ts imports only @opencode/plugin/rpc and effect, so the TUI bundle takes nothing else of the module", () => {
   const contracts = sources().filter(({ module }) => /^[^/]+\/rpc$/.test(module)).map(({ module }) => module)
-  expect(contracts).toEqual(expect.arrayContaining(["tree/rpc", "person/rpc"]))
+  expect(contracts).toEqual(expect.arrayContaining(["tree/rpc", "person/rpc", "memory/rpc"]))
   const graph = imports()
   const used = packages()
   const reaching = contracts.flatMap((module) =>
@@ -187,8 +192,8 @@ test("a module's rpc.ts imports only @opencode/plugin/rpc and effect, so the TUI
 })
 
 test("the tui entrypoint imports only @opencode/plugin/tui and the modules' tui.tsx and rpc.ts, the rpc entrypoint only their rpc.ts", () => {
-  expect(imports().get("tui")).toEqual(expect.arrayContaining(["tree/tui", "person/tui"]))
-  expect(imports().get("rpc")).toEqual(expect.arrayContaining(["tree/rpc", "person/rpc"]))
+  expect(imports().get("tui")).toEqual(expect.arrayContaining(["tree/tui", "person/tui", "memory/tui"]))
+  expect(imports().get("rpc")).toEqual(expect.arrayContaining(["tree/rpc", "person/rpc", "memory/rpc"]))
   const reaching = (["tui", "rpc"] as const).flatMap((entry) => {
     const allowed = (name: string) => moduleOf(name) !== undefined && ENTRY_REACH[entry]!.some((file) => name === `${moduleOf(name)}/${file}`)
     return [
@@ -215,7 +220,7 @@ test("skill.ts imports only kernel/", () => {
 
 test("a text.ts imports only kernel/, platform/json.ts and its own module's ports.ts and domain.ts", () => {
   const texts = [...imports()].filter(([module]) => module.endsWith("/text"))
-  expect(texts.map(([module]) => module).sort()).toEqual(["person/text", "scheduling/text", "tree/text", "webhook/text"])
+  expect(texts.map(([module]) => module).sort()).toEqual(["memory/text", "person/text", "scheduling/text", "tree/text", "webhook/text"])
   const reaching = texts.flatMap(([module, imported]) => {
     const own = module.slice(0, -"text".length)
     const allowed = (name: string) => name.startsWith("kernel/") || name === "platform/json" || name === `${own}ports` || name === `${own}domain`
@@ -260,4 +265,16 @@ test("only tree/store.ts names the tree's storage prefixes, so no other file bui
     .filter(({ file }) => prefix.test(readFileSync(join(SRC, file), "utf8")))
     .map(({ file }) => file.split("\\").join("/"))
   expect(naming).toEqual(["tree/store.ts"])
+})
+
+test("memory/store.ts is imported from no file outside memory/, and only it names the memory's storage prefix", () => {
+  const importing = [...imports()].filter(([, imported]) => imported.includes("memory/store")).map(([module]) => module)
+  expect(importing).toContain("memory/record")
+  expect(importing).toContain("memory/forget")
+  expect(importing).toContain("memory/rpc-handlers")
+  expect(importing.filter((module) => !module.startsWith("memory/") || module === "memory/index")).toEqual([])
+  const naming = sources()
+    .filter(({ file }) => /"memory\//.test(readFileSync(join(SRC, file), "utf8")))
+    .map(({ file }) => file.split("\\").join("/"))
+  expect(naming).toEqual(["memory/store.ts"])
 })

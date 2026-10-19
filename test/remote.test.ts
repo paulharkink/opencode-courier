@@ -9,7 +9,7 @@ import { handleRemote } from "../src/tree/peer.js"
 import { spawn } from "../src/tree/spawn.js"
 import { spawnText } from "../src/tree/text.js"
 import { DEFAULT_LIMITS } from "../src/tree/domain.js"
-import { childStore, rosterKey, settledKey } from "../src/tree/store.js"
+import { childStore, rosterKey, settledKey, wakeKey } from "../src/tree/store.js"
 
 describe("remote node configuration and addresses", () => {
   test("loads pairwise secrets from files and keeps peer roots absolute", () => {
@@ -202,6 +202,48 @@ describe("remote node configuration and addresses", () => {
       from: "head/ses_parent", sessionID: "ses_remote", message: "Please add a test", queue: true,
     }))
     expect(synthetics.at(-1)).toMatchObject({ sessionID: "ses_remote", delivery: "queue", metadata: { from: "head/ses_parent" } })
+  })
+
+  test("a peer interrupt forgets that child's pending wake before interrupting it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "courier-remote-"))
+    const secretFile = join(root, "shared.key")
+    writeFileSync(secretFile, "pairwise secret")
+    const remote = readRemoteConfig({ remoteNodes: { nodeId: "worker", peers: { head: { url: "http://head:4097", secretFile } } } })!
+    const values = new Map<string, unknown>()
+    const storage: any = {
+      get: async (key: string) => values.get(key),
+      set: async (key: string, value: unknown) => void values.set(key, value),
+      remove: async (key: string) => void values.delete(key),
+      scan: async ({ prefix }: any) => ({ entries: [...values].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })) }),
+    }
+    let interrupted = false
+    const ports: any = {
+      remote,
+      storage,
+      session: {
+        interrupt: async () => {
+          expect(values.has(wakeKey("ses_remote", "inbox_1"))).toBe(false)
+          interrupted = true
+          return { interrupted: true }
+        },
+      },
+      log: () => {},
+    }
+    await childStore(storage).record({
+      sessionID: "ses_remote",
+      parentID: "head/ses_parent",
+      title: "docs",
+      directory: root,
+      isolated: false,
+      createdAt: 1,
+      reports: "status",
+    })
+    values.set(wakeKey("ses_remote", "inbox_1"), { at: 1, text: "pending message", running: false })
+
+    await handleRemote(ports, ports, { version: 1, id: "r1", sender: "head", operation: "interrupt", payload: { sessionID: "ses_remote" } })
+
+    expect(values.has(wakeKey("ses_remote", "inbox_1"))).toBe(false)
+    expect(interrupted).toBe(true)
   })
 
   test("does not start a prepared remote session when the Head Unit cannot record it", async () => {

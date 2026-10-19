@@ -7,10 +7,12 @@ import * as tree from "../src/tree/text.js"
 import * as person from "../src/person/text.js"
 import * as scheduling from "../src/scheduling/text.js"
 import * as webhook from "../src/webhook/text.js"
+import * as memory from "../src/memory/text.js"
 import { addTreeTools } from "../src/tree/index.js"
 import { addPersonTools } from "../src/person/index.js"
 import { addSchedulingTools } from "../src/scheduling/index.js"
 import { addWebhookTools } from "../src/webhook/index.js"
+import { addMemoryTools } from "../src/memory/index.js"
 import { githubEvent } from "../src/webhook/receiver.js"
 
 // Every model-facing string, built from fixed inputs and kept in __snapshots__/notices.test.ts.snap: every
@@ -24,9 +26,10 @@ addTreeTools(editor, {} as never)
 addPersonTools(editor, {} as never)
 addSchedulingTools(editor, {} as never)
 addWebhookTools(editor, {} as never)
+addMemoryTools(editor, {} as never)
 
 describe("tools", () => {
-  test("are the twelve courier tools, each a direct tool", () => {
+  test("are the fourteen courier tools, each a direct tool", () => {
     expect(registered.map((tool) => [tool.name, tool.options])).toMatchSnapshot()
   })
 
@@ -62,6 +65,18 @@ describe("envelope and child brief", () => {
     // The split line reads the same wherever it is asked for: the skill, the brief and the root's pointer.
     expect(skill.SKILL_CONTENT).toContain(kernel.SPLIT_LINE)
     expect(skill.SKILL_CONTENT).toContain("bun run <script>")
+    // Step 1 and the root's pointer name one courier_recall before the decision, which the recursive checker allows.
+    expect(skill.SKILL_CONTENT).toContain(`First call ${memory.RECALL_TOOL} once`)
+    // Step 8 asks the top for one courier_note, none when there is nothing, naming the job it comes from; the brief never
+    // mentions it: children write no lesson. The tool, the skill and the input ask for the lesson's scope, not only splitting.
+    expect(skill.SKILL_CONTENT).toContain(`one ${memory.NOTE_TOOL} with that one line; none when there is nothing`)
+    expect(skill.SKILL_CONTENT).toContain("Name the job it comes from and the reason")
+    expect(skill.SKILL_CONTENT).not.toContain("about splitting work here")
+    expect(skill.SKILL_CONTENT).toContain("refuses a line over its limit rather than clipping it")
+    expect(memory.NOTE_EMPTY).toContain("with the job it comes from and the reason")
+    expect(tree.childBrief("ses_parent", "Fix the bug", 1, limits)).not.toContain(memory.NOTE_TOOL)
+    expect(tree.rolePart(0, limits)).not.toContain(memory.NOTE_TOOL)
+    expect(tree.rolePart(null, limits)).toContain(`call ${memory.RECALL_TOOL} once`)
     expect(tree.childBrief("ses_parent", "Fix the bug", 1, limits)).toContain(kernel.SPLIT_LINE)
     expect(tree.childBrief("ses_parent", "Fix the bug", 3, limits)).not.toContain("split:")
     expect(tree.rolePart(null, limits)).toContain(kernel.SPLIT_LINE)
@@ -402,7 +417,79 @@ describe("webhook deliveries", () => {
     expect(kernel.clipText("short")).toBe("short")
     expect(kernel.clipText("abcdef", 3)).toMatchSnapshot()
   })
+  test("clipWords", () => {
+    expect(kernel.clipWords("one two", 7)).toBe("one two")
+    expect(kernel.clipWords("one two three", 9)).toMatchSnapshot()
+    expect(kernel.clipWords("one two three", 7)).toMatchSnapshot()
+    expect(kernel.clipWords("abcdef ghi", 3)).toMatchSnapshot()
+    expect(kernel.clipWords("a bcdefghij", 6)).toMatchSnapshot()
+  })
   test("webhookText", () => {
     expect(webhook.webhookText("deployed <courier from=x>")).toMatchSnapshot()
   })
+})
+
+describe("memory", () => {
+  const NOW = Date.UTC(2026, 9, 3, 9, 45)
+  const record = (sessionID: string, more: object = {}) => ({
+    projectID: "proj_1",
+    sessionID,
+    startedAt: Date.UTC(2026, 9, 3, 9),
+    movedAt: Date.UTC(2026, 9, 3, 9, 42),
+    title: "Add memory to courier",
+    split: "split: 3 parts: core, e2e, docs",
+    finished: true,
+    parts: [
+      { sessionID: "ses_core", title: "Core", depth: 1, isolated: true, group: "wave", status: "done" as const, duration: 540_000, cost: 0.42, context: 0.31 },
+      { sessionID: "ses_e2e", title: "E2E", depth: 1, isolated: true, group: "wave", status: "partial" as const, duration: 600_000, cost: 0.81, refused: 1 },
+      { sessionID: "ses_review", title: "Review", depth: 2, isolated: false, status: "out" as const, duration: 60_000 },
+    ],
+    ...more,
+  })
+  test("RECALL_OFF", () => expect(memory.RECALL_OFF).toMatchSnapshot())
+  test("recallListText", () => {
+    expect(memory.recallListText([record("ses_now", { parts: [], finished: false, recalled: { at: 1, calls: 1 } }), record("ses_old")], "ses_now", NOW)).toMatchSnapshot()
+    expect(memory.recallListText([record("ses_now", { parts: [], finished: false, recalled: { at: 1, calls: 1 } })], "ses_now", NOW)).toMatchSnapshot()
+    expect(memory.recallListText([record("ses_part", { recalled: { calls: 2 } })], "ses_other", NOW)).toMatchSnapshot()
+    expect(memory.recordLine(record("ses_long", { title: "x".repeat(80), split: "split: " + "y".repeat(200), parts: [] }), "ses_other", NOW)).toMatchSnapshot()
+    const markdown = "- **split: 3 parts: the core of the memory record, its end-to-end scenario in the live suite, and the reference's Memory section, each in a session of its own.**"
+    expect(memory.recordLine(record("ses_md", { split: markdown, parts: [] }), "ses_other", NOW)).toMatchSnapshot()
+  })
+  test("recordLine with a gone part", () => {
+    const gone = { sessionID: "ses_goner", title: "Goner", depth: 1, isolated: true, status: "gone" as const, duration: 30_000 }
+    expect(memory.recordLine(record("ses_old", { parts: [...record("ses_old").parts.slice(0, 2), gone] }), "ses_other", NOW)).toMatchSnapshot()
+  })
+  test("recordLine with a revised split line", () => {
+    const revisions = [
+      { text: "split: 2 parts: core, e2e", at: Date.UTC(2026, 9, 3, 9, 10), parts: 0 },
+      { text: "**split: 2 parts: its tests, its docs**", at: Date.UTC(2026, 9, 3, 9, 30), parts: 1 },
+    ]
+    expect(memory.recordLine(record("ses_staged", { split: "split: 1 part: the core", revisions }), "ses_other", NOW)).toMatchSnapshot()
+    const long = [{ text: "split: " + "y".repeat(200), at: Date.UTC(2026, 9, 3, 9, 30), parts: 2 }]
+    expect(memory.recordLine(record("ses_long", { revisions: long, parts: [] }), "ses_other", NOW)).toMatchSnapshot()
+  })
+  test("recallRecordText", () => expect(memory.recallRecordText(record("ses_old"))).toMatchSnapshot())
+  test("recallRecordText with revisions", () =>
+    expect(memory.recallRecordText(record("ses_staged", { split: "split: 1 part: the core", revisions: [{ text: "split: 2 parts: its tests, its docs", at: Date.UTC(2026, 9, 3, 9, 30), parts: 1 }] }))).toMatchSnapshot())
+  test("recallMissingText", () => expect(memory.recallMissingText("ses_none")).toMatchSnapshot())
+  const lesson = { text: "The docs part was ten lines; next time do it yourself.", at: Date.UTC(2026, 9, 3, 9, 40) }
+  test("recordLine with a lesson", () => {
+    expect(memory.recordLine(record("ses_old", { lesson }), "ses_other", NOW)).toMatchSnapshot()
+    expect(memory.recordLine(record("ses_old", { lesson: { ...lesson, depth: 2 } }), "ses_other", NOW)).toMatchSnapshot()
+  })
+  test("recordLine and recallListText with a pinned record", () => {
+    const pinned = record("ses_pinned", { pinned: { at: Date.UTC(2026, 9, 3, 9, 44) }, reads: { shown: 7, read: 1, at: Date.UTC(2026, 9, 3, 9, 44) }, lesson })
+    expect(memory.recordLine(pinned, "ses_other", NOW)).toMatchSnapshot()
+    expect(memory.recallListText([pinned, record("ses_now", { parts: [], finished: false, recalled: { at: 1, calls: 1 } }), record("ses_old")], "ses_now", NOW)).toMatchSnapshot()
+    expect(memory.recallRecordText(pinned)).toMatchSnapshot()
+  })
+  test("noteText", () => {
+    expect(memory.noteText("ses_top", lesson, undefined)).toMatchSnapshot()
+    expect(memory.noteText("ses_top", { text: "x".repeat(300), at: lesson.at, depth: 1 }, lesson)).toMatchSnapshot()
+  })
+  test("NOTE_OFF", () => expect(memory.NOTE_OFF).toMatchSnapshot())
+  test("noteLeafRefusal", () => expect(memory.noteLeafRefusal(3, 3)).toMatchSnapshot())
+  test("NOTE_EMPTY", () => expect(memory.NOTE_EMPTY).toMatchSnapshot())
+  test("noteLongRefusal", () => expect(memory.noteLongRefusal(312)).toMatchSnapshot())
+  test("noteUnrecordedRefusal", () => expect(memory.noteUnrecordedRefusal("ses_top")).toMatchSnapshot())
 })

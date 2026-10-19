@@ -3,16 +3,23 @@ import { describe, expect, test } from "bun:test"
 import { cancelScheduled, type LaterPorts } from "../src/scheduling/index.js"
 import { DEFAULT_LIMITS, type RosterEntry } from "../src/tree/domain.js"
 import { holdReport, joinGroup } from "../src/tree/group.js"
-import { lastTool, panel } from "../src/tree/panel.js"
-import type { CourierPorts, Pending, StopPorts } from "../src/tree/ports.js"
+import { contextOf, lastTool, panel } from "../src/tree/panel.js"
+import type { CleanupPorts, CourierPorts, Pending, ShownForm, StopPorts } from "../src/tree/ports.js"
 import { registerTreeRpc } from "../src/tree/rpc-handlers.js"
 import { treeRpc } from "../src/tree/rpc.js"
-import { childStore, groupStore } from "../src/tree/store.js"
+import { childStore, groupStore, wakeStore } from "../src/tree/store.js"
 
 type Session = { updated: number; idle?: number; outcome?: string; cost?: number; title?: string; messages?: unknown[] }
+type Window = { providerID: string; id: string; context: number }
 
 /** Ports over an in-memory store, with each session as given; one not given is gone. */
-function fakePorts(sessions: Record<string, Session>, pending: Record<string, Pending[]> = {}, maxTotal = DEFAULT_LIMITS.maxTotal) {
+function fakePorts(
+  sessions: Record<string, Session>,
+  pending: Record<string, Pending[]> = {},
+  maxTotal = DEFAULT_LIMITS.maxTotal,
+  forms: Record<string, ShownForm[]> = {},
+  windows: Window[] = [],
+) {
   const store = new Map<string, unknown>()
   const calls: { method: string; input: any }[] = []
   const storage = {
@@ -50,6 +57,8 @@ function fakePorts(sessions: Record<string, Session>, pending: Record<string, Pe
       },
     },
     pending: async (sessionID: string) => pending[sessionID] ?? [],
+    forms: async (sessionID: string) => forms[sessionID] ?? [],
+    windows: async () => windows,
     limits: { ...DEFAULT_LIMITS, maxTotal },
   } as unknown as CourierPorts
   return { ports, store, calls }
@@ -89,7 +98,53 @@ describe("lastTool", () => {
   })
 })
 
+const reply = (tokens: Record<string, any> | undefined, model = { providerID: "mock", id: "small" }) => ({
+  type: "assistant",
+  id: "msg",
+  model,
+  time: { created: 1 },
+  content: [],
+  ...(tokens ? { tokens } : {}),
+})
+const usage = (input: number, output = 0, read = 0, write = 0) => ({ input, output, reasoning: 0, cache: { read, write } })
+const SMALL = { providerID: "mock", id: "small", context: 1_000 }
+
+describe("contextOf", () => {
+  test("is the last message with usage over its model's window, as OpenCode's session view reads it", () => {
+    const messages = [reply(usage(900)), reply(usage(100, 50, 200, 50))]
+    expect(contextOf(messages as any, [SMALL])).toBe(0.4)
+    expect(contextOf([...messages, reply(undefined)] as any, [SMALL])).toBe(0.4)
+  })
+
+  test("counts from the last completed compaction on", () => {
+    const compaction = (status: string) => ({ type: "compaction", id: "c", status })
+    expect(contextOf([reply(usage(900)), compaction("completed")] as any, [SMALL])).toBeUndefined()
+    expect(contextOf([reply(usage(900)), compaction("completed"), reply(usage(100))] as any, [SMALL])).toBe(0.1)
+    expect(contextOf([reply(usage(900)), compaction("running")] as any, [SMALL])).toBe(0.9)
+  })
+
+  test("is none without usage, with all-zero usage, or without a known window for the message's model", () => {
+    expect(contextOf([] as any, [SMALL])).toBeUndefined()
+    expect(contextOf([reply(usage(0))] as any, [SMALL])).toBeUndefined()
+    expect(contextOf([reply(usage(100))] as any, [])).toBeUndefined()
+    expect(contextOf([reply(usage(100))] as any, [{ ...SMALL, context: 0 }])).toBeUndefined()
+    expect(contextOf([reply(usage(100), { providerID: "mock", id: "other" })] as any, [SMALL])).toBeUndefined()
+  })
+})
+
 describe("panel", () => {
+  test("carries a row's context use, and leaves it out when the model's window is unknown", async () => {
+    const sessions = { ses_a: { updated: 5, idle: 5, messages: [reply(usage(250))] } }
+    const known = fakePorts(sessions, {}, undefined, {}, [SMALL])
+    await childStore(known.ports.storage).record(entry("ses_a", "ses_root"))
+    expect((await panel(known.ports, "ses_root")).rows[0]?.context).toBe(0.25)
+    const unknown = fakePorts(sessions)
+    await childStore(unknown.ports.storage).record(entry("ses_a", "ses_root"))
+    const rows = (await panel(unknown.ports, "ses_root")).rows
+    expect(rows).toHaveLength(1)
+    expect("context" in rows[0]!).toBe(false)
+  })
+
   test("reads each session under the root, in the order a tree is drawn, with what it does, its report and its last tool call", async () => {
     const { ports } = fakePorts(
       {
@@ -182,6 +237,73 @@ describe("panel", () => {
     expect(rows[2]!.title).toBe("entry ses_gone")
   })
 
+  test("marks a stalled session stalled, since its oldest message woken again in vain was enqueued, and the root's own stall", async () => {
+    const { ports } = fakePorts({ ses_stalled: { updated: 9, idle: 5 }, ses_root: { updated: 9, idle: 5 } })
+    await childStore(ports.storage).record(entry("ses_stalled", "ses_root"))
+    const wakes = wakeStore(ports.storage)
+    const stalled = { text: "report", running: false, rewoken: 7, stalled: 8 }
+    await wakes.put({ sessionID: "ses_stalled", inboxID: "msg_2", at: 6, ...stalled })
+    await wakes.put({ sessionID: "ses_stalled", inboxID: "msg_1", at: 4, ...stalled })
+
+    const tree = await panel(ports, "ses_root")
+    expect(tree.rows.map(({ state, stalled }) => ({ state, stalled }))).toEqual([{ state: "stalled", stalled: 4 }])
+    expect(tree).not.toHaveProperty("stalled")
+    await wakes.put({ sessionID: "ses_root", inboxID: "msg_3", at: 3, ...stalled })
+    expect((await panel(ports, "ses_root")).stalled).toBe(3)
+  })
+
+  test("says a running session showing a form waits, one line per form after its requests, and not an idle one's form, whose withdrawal was missed", async () => {
+    const { ports } = fakePorts(
+      { ses_form: { updated: 5 }, ses_both: { updated: 5 }, ses_stale: { updated: 5, idle: 5 } },
+      { ses_both: [{ type: "permission", requestID: "per_1", action: "websearch", resources: ["*"] }] },
+      DEFAULT_LIMITS.maxTotal,
+      {
+        ses_form: [{ id: "frm_1", title: "Web Search" }, { id: "frm_2", title: "Choose a web search provider" }],
+        ses_both: [{ id: "frm_3", title: "Web Search" }],
+        ses_stale: [{ id: "frm_4", title: "Web Search" }],
+      },
+    )
+    for (const sessionID of ["ses_form", "ses_both", "ses_stale"]) await childStore(ports.storage).record(entry(sessionID, "ses_root"))
+
+    const { rows } = await panel(ports, "ses_root")
+    expect(rows.map(({ sessionID, state, waits }) => ({ sessionID, state, waits }))).toEqual([
+      {
+        sessionID: "ses_form",
+        state: "waiting",
+        waits: [
+          { type: "form", title: "Web Search" },
+          { type: "form", title: "Choose a web search provider" },
+        ],
+      },
+      {
+        sessionID: "ses_both",
+        state: "waiting",
+        waits: [
+          { type: "permission", action: "websearch", resources: ["*"] },
+          { type: "form", title: "Web Search" },
+        ],
+      },
+      { sessionID: "ses_stale", state: "idle", waits: [] },
+    ])
+  })
+
+  test("marks a session courier_stop stopped since its last prompt, and not one prompted again", async () => {
+    const { ports } = fakePorts({ ses_stopped: { updated: 5, idle: 5, outcome: "interrupted" }, ses_again: { updated: 5, idle: 5 }, ses_plain: { updated: 5, idle: 5 } })
+    const children = childStore(ports.storage)
+    for (const sessionID of ["ses_stopped", "ses_again", "ses_plain"]) {
+      await children.record(entry(sessionID, "ses_root"))
+      await children.prompted(sessionID, 900)
+    }
+    await children.stopped("ses_stopped", 950)
+    await children.stopped("ses_again", 950)
+    await children.prompted("ses_again", 960)
+
+    const { rows } = await panel(ports, "ses_root")
+    const stopped = (id: string) => rows.find((row) => row.sessionID === id)!.stopped
+    expect([stopped("ses_stopped"), stopped("ses_again"), stopped("ses_plain")]).toEqual([true, undefined, undefined])
+    expect(rows.find((row) => row.sessionID === "ses_again")).not.toHaveProperty("stopped")
+  })
+
   test("is empty for a session that started none, and lists at most maxTotal sessions: the live ones first, then the newest, counting the rest", async () => {
     const { ports } = fakePorts(
       { ses_a: { updated: 5, idle: 5 }, ses_b: { updated: 5, idle: 5 }, ses_c: { updated: 5, idle: 5 }, ses_d: { updated: 9, idle: 5 } },
@@ -200,11 +322,19 @@ describe("panel", () => {
   })
 })
 
-/** The tree's RPC registered over fake ports with courier_stop's: its handlers. */
+/** The tree's RPC registered over fake ports with courier_stop's and courier_cleanup's, whose worktrees are clean: its handlers. */
 async function registered(sessions: Record<string, Session>) {
   const { ports, calls } = fakePorts(sessions)
   const later = { storage: ports.storage, session: ports.session, now: () => 1_000, newID: () => "later_1", log: () => {} } as unknown as LaterPorts
-  const stopPorts = { courier: ports, cancelScheduled: (sessionID: string) => cancelScheduled(later, sessionID), cleanup: {} } as unknown as StopPorts
+  const cleanup: CleanupPorts = {
+    storage: ports.storage,
+    worktree: { remove: async (input: unknown) => void calls.push({ method: "remove", input }) } as unknown as CleanupPorts["worktree"],
+    projectID: "prj",
+    inspect: async () => ({ changes: [], commits: [] }),
+    now: () => 1_000,
+    nudge: () => {},
+  }
+  const stopPorts = { courier: ports, cancelScheduled: (sessionID: string) => cancelScheduled(later, sessionID), cleanup } as unknown as StopPorts
   let handlers: any
   await registerTreeRpc({ register: async (_definition: unknown, given: unknown) => ((handlers = given), {} as any) } as any, stopPorts)
   return { ports, calls, handlers }
@@ -246,13 +376,62 @@ describe("the tree's RPC", () => {
     })
     expect(await handlers.stop({ sessionID: "ses_unknown", by: "ses_root" }, { error })).toMatchObject({ type: "refused" })
   })
+
+  test("cleanup forgets a session as courier_cleanup called from its own parent, when `by` is above it", async () => {
+    const { ports, calls, handlers } = await registered({})
+    await childStore(ports.storage).record(entry("ses_mid", "ses_root"))
+    await childStore(ports.storage).record(entry("ses_leaf", "ses_mid", { isolated: true, directory: "/wt/leaf" }))
+    const error = (type: string, message: string, data: unknown) => ({ type, message, data })
+
+    expect(await handlers.cleanup({ sessionID: "ses_leaf", by: "ses_root" }, { error })).toEqual({ outcome: "removed" })
+    expect(calls.filter((call) => call.method === "remove").map((call) => call.input.directory)).toEqual(["/wt/leaf"])
+    expect(await childStore(ports.storage).entry("ses_mid", "ses_leaf")).toBeUndefined()
+    expect(await handlers.cleanup({ sessionID: "ses_mid", by: "ses_root" }, { error })).toEqual({ outcome: "forgotten" })
+    expect(await childStore(ports.storage).entry("ses_root", "ses_mid")).toBeUndefined()
+  })
+
+  test("cleanup refuses a `by` that is not above the target, and a session not on the roster, and forgets nothing", async () => {
+    const { ports, calls, handlers } = await registered({})
+    await childStore(ports.storage).record(entry("ses_mid", "ses_root"))
+    await childStore(ports.storage).record(entry("ses_leaf", "ses_mid", { isolated: true, directory: "/wt/leaf" }))
+    const error = (type: string, message: string, data: unknown) => ({ type, message, data })
+
+    for (const by of ["ses_other", "ses_leaf"])
+      expect(await handlers.cleanup({ sessionID: "ses_leaf", by }, { error })).toEqual({
+        type: "refused",
+        message: expect.stringContaining(`${by} is not above ses_leaf`),
+        data: {},
+      })
+    expect(await handlers.cleanup({ sessionID: "ses_unknown", by: "ses_root" }, { error })).toMatchObject({ type: "refused" })
+    expect(calls.filter((call) => call.method === "remove")).toEqual([])
+    expect(await childStore(ports.storage).entry("ses_mid", "ses_leaf")).toBeDefined()
+  })
+
+  test("cleanup refuses a session OpenCode still has, or cannot say it lost, and forgets nothing", async () => {
+    const { ports, calls, handlers } = await registered({ ses_leaf: { updated: 5 } })
+    await childStore(ports.storage).record(entry("ses_leaf", "ses_root", { isolated: true, directory: "/wt/leaf" }))
+    const error = (type: string, message: string, data: unknown) => ({ type, message, data })
+
+    expect(await handlers.cleanup({ sessionID: "ses_leaf", by: "ses_root" }, { error })).toEqual({
+      type: "refused",
+      message: "ses_leaf is still known to OpenCode: only a gone session is forgotten here.",
+      data: {},
+    })
+    ;(ports.session as any).get = async () => Promise.reject(new Error("connection reset"))
+    expect(await handlers.cleanup({ sessionID: "ses_leaf", by: "ses_root" }, { error })).toMatchObject({ type: "refused", message: expect.stringContaining("connection reset") })
+    expect(calls.filter((call) => call.method === "remove")).toEqual([])
+    expect(await childStore(ports.storage).entry("ses_root", "ses_leaf")).toBeDefined()
+  })
 })
 
-test("the tree and stop methods' schemas take a session, and stop a caller too", async () => {
-  const { tree, stop } = treeRpc.methods
+test("the tree, stop and cleanup methods' schemas take a session, stop a caller too, and a kept worktree its reason", async () => {
+  const { tree, stop, cleanup } = treeRpc.methods
   expect((await tree.input["~standard"].validate({ sessionID: "ses_root" })).issues).toBeUndefined()
   expect((await tree.output["~standard"].validate({ rows: [] })).issues).toBeUndefined()
   expect((await stop.input["~standard"].validate({ sessionID: "ses_a" })).issues).toBeDefined()
   expect((await stop.input["~standard"].validate({ sessionID: "ses_a", by: "ses_root" })).issues).toBeUndefined()
   expect((await stop.output["~standard"].validate({ stopped: [], cancelled: -1 })).issues).toBeDefined()
+  expect((await cleanup.output["~standard"].validate({ outcome: "kept" })).issues).toBeDefined()
+  expect((await cleanup.output["~standard"].validate({ outcome: "kept", reason: "1 uncommitted change (a)" })).issues).toBeUndefined()
+  expect((await cleanup.output["~standard"].validate({ outcome: "removed" })).issues).toBeUndefined()
 })

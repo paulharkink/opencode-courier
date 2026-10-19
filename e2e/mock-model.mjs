@@ -51,6 +51,12 @@ function decide(body) {
     // The middle session of COURIER-SUBTREE-START has started its leaf and then waits for a model reply that does not come in time.
     if (call?.function?.name === "courier_spawn" && textOf(messages.find((message) => message.role === "user")?.content).includes("CHILD-SUBTREE-MID"))
       return { text: "MID HOLDING", hold: true }
+    // COURIER-STALL's root ends its turn once its middle is started.
+    if (call?.function?.name === "courier_spawn" && prompt.includes("COURIER-STALL")) return { text: "ROOT SPAWNED" }
+    // COURIER-STALL's middle has started its leaf and ends its turn; the test stages a revert on it, so the
+    // leaf's report, held back by the delay, is admitted without a wake.
+    if (call?.function?.name === "courier_spawn" && textOf(messages.find((message) => message.role === "user")?.content).includes("CHILD-STALL-MID"))
+      return { text: "MID SPAWNED" }
     // Any user message, not just the last: a child's report may already have been steered in.
     const roster = messages.some((message) => message.role === "user" && textOf(message.content).includes("COURIER-ROSTER"))
     if (call?.function?.name === "courier_spawn" && roster) {
@@ -90,6 +96,14 @@ function decide(body) {
     // The middle session of COURIER-GROUP-NESTED ends its turn a while after starting its group, which has reported by then.
     if (call?.function?.name === "courier_spawn" && startedBy && textOf(messages.find((message) => message.role === "user")?.content).includes("CHILD-GROUPS"))
       return { text: "MIDDLE SPAWNED", delayed: true }
+    // COURIER-NOTE-BELOW: the middle session, once it has noted from depth 1, starts a leaf that notes too, and ends its
+    // turn; the leaf reports what its courier_note call gave.
+    if (startedBy && first.includes("CHILD-NOTES-MID")) {
+      if (call?.function?.name === "courier_note") return { tool: "courier_spawn", args: { task: "CHILD-NOTES-LEAF CHILD-FORCES" } }
+      if (call?.function?.name === "courier_spawn") return { text: "MID SPAWNED LEAF" }
+    }
+    if (startedBy && first.includes("CHILD-NOTES-LEAF") && call?.function?.name === "courier_note")
+      return { tool: "courier_send", args: { sessionID: startedBy[1], message: `LEAF GOT ${result}`, status: "done" } }
     // A leaf of COURIER-DEPTH reports what its courier_spawn call gave.
     if (call?.function?.name === "courier_spawn" && startedBy && textOf(messages.find((message) => message.role === "user")?.content).includes("CHILD-LEAF"))
       return { tool: "courier_send", args: { sessionID: startedBy[1], message: `LEAF GOT ${result}`, status: "done" } }
@@ -115,6 +129,9 @@ function decide(body) {
     .slice(lastAssistant + 1)
     .map((message) => textOf(message.content))
     .join("\n")
+  // COURIER-SAY replies with the rest of the line, markdown and all, up to the quote the prompt arrives with.
+  const saying = recent.match(/COURIER-SAY ([^"\n]+)/)
+  if (saying) return { text: saying[1] }
   const parent = recent.match(/You were started by session (ses_\w+) through opencode-courier/)
   // COURIER-NEST's middle session commits on its branch, then merges the branch its leaf reports.
   const nestBranch = branchIn(messages)
@@ -155,6 +172,9 @@ function decide(body) {
   // The middle session of COURIER-GROUP-NESTED starts two quick leaves in one group.
   if (parent && recent.includes("CHILD-GROUPS"))
     return { calls: [0, 1].map(() => ({ tool: "courier_spawn", args: { task: "CHILD-QUICK", group: "pair" } })) }
+  // COURIER-NOTE-BELOW: the middle session writes a lesson from depth 1; its leaf, hidden the tool, calls it anyway.
+  if (parent && recent.includes("CHILD-NOTES-MID")) return { tool: "courier_note", args: { text: "Noted from depth 1" } }
+  if (parent && recent.includes("CHILD-NOTES-LEAF")) return { tool: "courier_note", args: { text: "Noted from a leaf" } }
   // A member of COURIER-GROUP-SPLIT's group reports at once, before its parent's turn has ended.
   if (parent && recent.includes("CHILD-QUICK"))
     return { tool: "courier_send", args: { sessionID: parent[1], message: "CHILD DONE QUICKLY", status: "done" }, quick: true }
@@ -189,6 +209,9 @@ function decide(body) {
       tool: "courier_send",
       args: { sessionID: startedBy[1], message: answered[1] ? "CHILD DISMISSED" : `CHILD GOT ${JSON.stringify(answersIn(recent))}`, status: "done" },
     }
+  // The middle of COURIER-STALL starts a leaf and ends its turn; the leaf's report is held back by the
+  // delay, so the test stages a revert on the middle before it lands.
+  if (parent && recent.includes("CHILD-STALL-MID")) return { tool: "courier_spawn", args: { task: "CHILD-STALL-LEAF" } }
   // Any other child reports done, with every kind of artifact.
   if (parent) return { tool: "courier_send", args: { sessionID: parent[1], message: "CHILD DONE", status: "done", artifacts: ARTIFACTS } }
   // A native child's question is shown to the person by OpenCode: the parent is told, and ends its turn without asking.
@@ -224,10 +247,14 @@ function decide(body) {
   // Told that its child shows a form only the person can answer, it ends its turn, as if it had told them.
   const form = recent.match(/<courier from="ses_\w+" asks="form" form="([^"]+)"/)
   if (form) return { text: `PARENT TOLD FORM ${form[1]}` }
-  if (/<courier from="ses_\w+" (answered|settled)=/.test(recent)) return { text: "PARENT SETTLED" }
+  // A permission request's settled notice is sent without a wake and may wait for a report's turn: that turn is the report's.
+  if (/<courier from="ses_\w+" (answered|settled)=/.test(recent) && !/<courier from="ses_\w+" status="/.test(recent)) return { text: "PARENT SETTLED" }
   if (/<courier from="ses_\w+" ended="without-report">/.test(recent)) return { text: "PARENT TOLD SILENT" }
   // A group's reports, in one message, or a member's blocked report, which is not held.
   // A middle session reports its group's message on; a root parent ends its turn on it.
+  // The middle session of COURIER-NOTE-BELOW reports what its leaf got on to the root.
+  if (startedBy && /<courier from="ses_\w+" status="done">/.test(recent) && textOf(messages.find((message) => message.role === "user")?.content).includes("CHILD-NOTES-MID"))
+    return { tool: "courier_send", args: { sessionID: startedBy[1], message: `MID GOT ${recent.match(/LEAF GOT [^\n]*/)?.[0] ?? "nothing"}`, status: "done" } }
   if (/<courier from="[^"]*" group="/.test(recent) && startedBy)
     return { tool: "courier_send", args: { sessionID: startedBy[1], message: "MIDDLE GOT GROUP", status: "done" } }
   if (/<courier from="[^"]*" group="/.test(recent)) return { text: "PARENT GOT GROUP" }
@@ -251,11 +278,21 @@ function decide(body) {
   // attached the skill to carries its text, which the model acknowledges.
   if (recent.includes('<skill_content name="courier-orchestrate">')) return { text: "SKILL SEEN" }
   if (recent.includes("COURIER-SKILL")) return { tool: "skill", args: { id: "courier-orchestrate" } }
+  // COURIER-NOTE writes the rest of the line as the tree's lesson; COURIER-NOTE-BELOW starts a middle session that notes.
+  if (recent.includes("COURIER-NOTE-BELOW")) return { tool: "courier_spawn", args: { task: "CHILD-NOTES-MID" } }
+  const noting = recent.match(/COURIER-NOTE ([^"\n]+)/)
+  if (noting) return { tool: "courier_note", args: { text: noting[1] } }
+  // COURIER-RECALL reads the project's tree records, or one in full.
+  const recallOf = recent.match(/COURIER-RECALL(?: (ses_\w+))?/)
+  if (recallOf) return { tool: "courier_recall", args: recallOf[1] ? { sessionID: recallOf[1] } : {} }
   const look = recent.match(/COURIER-STATUS (ses_\w+)/)
   if (look) return { tool: "courier_status", args: { sessionID: look[1] } }
   const clean = recent.match(/COURIER-CLEANUP (ses_\w+)( force)?/)
   if (clean) return { tool: "courier_cleanup", args: { sessionID: clean[1], ...(clean[2] ? { force: true } : {}) } }
   if (recent.includes("COURIER-SUBTREE-START")) return { tool: "courier_spawn", args: { task: "CHILD-SUBTREE-MID" } }
+  // COURIER-STALL: the root starts a middle session, which starts a leaf and ends its turn; the test stages a
+  // revert on the middle, so the leaf's report is admitted without a wake.
+  if (recent.includes("COURIER-STALL")) return { tool: "courier_spawn", args: { task: "CHILD-STALL-MID" } }
   if (recent.includes("COURIER-SUBTREE-TREE")) return { tool: "courier_tree", args: {} }
   const stopping = recent.match(/COURIER-SUBTREE-STOP (ses_\w+)/)
   if (stopping) return { tool: "courier_stop", args: { sessionID: stopping[1] } }

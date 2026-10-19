@@ -12,6 +12,7 @@ import {
   addPersonTools,
   asksPermission,
   asksQuestion,
+  formsShown,
   joinRelay,
   noticeCutOff,
   pendingOf,
@@ -21,14 +22,17 @@ import {
   registerPersonRpc,
   relayQuestions,
   type AnswerPorts,
+  type FormsShown,
   type Permissions,
   type PersonState,
   type QuestionPorts,
 } from "./person/index.js"
+import { addMemoryTools, memoryEvents, NOTE_TOOL, readMemory, RECALL_TOOL, registerMemoryRpc, sweepRecords, type MemoryPorts, type MemoryState } from "./memory/index.js"
 import { addSkill } from "./skill.js"
 import {
   addTreeTools,
   deliverReleased,
+  wakeMissed,
   dirtyOf,
   headOf,
   handleRemote,
@@ -63,13 +67,20 @@ const gate = sharedState<SpawnGate>("spawning", () => ({ reserved: new Set(), tu
 /** The type of each item enqueued for a spawned session, outside the hub like the gate. */
 const inbox = sharedState("inbox", () => new Map<string, string>())
 
+/** The forms shown now, which the person events keep and the footer and tree panel count; outside the hub like the inbox. */
+const shown = sharedState<FormsShown>("formsShown", () => new Map())
+
+/** What the memory shares: the models' windows, the locations with memory off, the tops that recalled and the turn ends recorded. */
+const memoryState = sharedState<MemoryState>("memory", () => ({ windows: new Map(), off: new Set(), tops: new Set(), seen: new Set() }))
+
 /**
  * What each tick of the scheduler does, in order, through the first loaded member, of whichever copy:
- * due `courier_later` messages, then released join groups. Every hub-v2 member's `later` is its LaterPorts.
+ * due `courier_later` messages, released join groups, then missed wakes. Every hub-v2 member's `later` is its LaterPorts.
  */
 const jobs: TickJob[] = [
   dueJob,
   (owner, claimed) => deliverReleased(owner.later as LaterPorts, claimed),
+  (owner, claimed) => wakeMissed(owner.later as LaterPorts, claimed),
 ]
 
 const { join, track, nudge } = openInProcess(jobs)
@@ -81,7 +92,7 @@ const permissions = domains as () => Iterable<Permissions>
 // several subscriptions and copies see the same events. The scheduler's claim set is the hub's own.
 const { watched } = hub
 const watchState: WatchState = { seen: watched.seen, inbox }
-const personState: PersonState = { ...watched, forms: hub.forms }
+const personState: PersonState = { ...watched, forms: hub.forms, shown }
 
 /**
  * What a session waits on outside the tree, for the silent-turn rule, cheapest first: a request of its
@@ -90,7 +101,7 @@ const personState: PersonState = { ...watched, forms: hub.forms }
 const outside = waitsOn(asksPermission, asksQuestion, together(isScheduled, subscribedSince))
 
 /** What the hub's subscriptions do with each event of OpenCode's, module by module, in this order. */
-const eventModules = [treeEvents(watchState, outside), personEvents(personState)]
+const eventModules = [treeEvents(watchState, outside), personEvents(personState), memoryEvents(memoryState)]
 
 /**
  * The courier tools and webhook receiver, as a promise plugin joining the hub that runs the scheduler
@@ -125,7 +136,8 @@ export const courier = () => Plugin.define({
     } catch (error) {
       log(`courier remote nodes: not configured: ${error instanceof Error ? error.message : String(error)}`)
     }
-    for (const problem of [...problems, ...nativeProblems]) log(`courier: ${problem}`)
+    const { memory, problems: memoryProblems } = readMemory(ctx.options)
+    for (const problem of [...problems, ...nativeProblems, ...memoryProblems]) log(`courier: ${problem}`)
     const roles = new Map<string, number | null>()
     const ports: CourierPorts = {
       limits,
@@ -142,6 +154,7 @@ export const courier = () => Plugin.define({
       directory: ctx.location.directory,
       projectID: ctx.location.project.id,
       now: Date.now,
+      windows: async () => (await ctx.model.list()).data.map((model) => ({ providerID: model.providerID, id: model.id, context: model.limit.context })),
       head: headOf,
       dirty: dirtyOf,
       pending: async (sessionID) => {
@@ -151,6 +164,7 @@ export const courier = () => Plugin.define({
         ])
         return [...requests, ...questions]
       },
+      forms: (sessionID) => Promise.resolve(formsShown(shown, sessionID)),
     }
     const cleanupPorts: CleanupPorts = { ...ports, inspect: inspectWorktree }
     const answerPorts: AnswerPorts = { storage: ctx.storage, permissions, assert: (input) => ctx.permission.assert(input) }
@@ -176,22 +190,32 @@ export const courier = () => Plugin.define({
     }
 
     const stopPorts = { courier: ports, cancelScheduled: (sessionID: string) => cancelScheduled(later, sessionID), cleanup: cleanupPorts }
-    // The tools in a fixed order: the tree's, then the person's, the scheduled messages' and the webhooks'.
+    const memoryPorts: MemoryPorts = { storage: ctx.storage, session: ctx.session, now: Date.now, log, projectID: ctx.location.project.id, memory, maxDepth: limits.maxDepth }
+    // The tools in a fixed order: the tree's, then the person's, the scheduled messages', the webhooks' and the memory's.
     await ctx.tool.transform((tools) => {
       addTreeTools(tools, { courier: ports, cleanup: cleanupPorts, stop: stopPorts })
       addPersonTools(tools, { answer: answerPorts, questions: questionPorts, waiting: watched.waiting })
       addSchedulingTools(tools, later)
       addWebhookTools(tools, { hooks, receiving })
+      addMemoryTools(tools, { memory: memoryPorts, state: memoryState })
     })
     await ctx.skill.transform(addSkill)
     // What the TUI part reads and its stop; a host that cannot register it still gets the rest, the tools included.
     await Promise.resolve()
       .then(() => registerTreeRpc(ctx.rpc, stopPorts))
       .then(() => registerPersonRpc(ctx.rpc, { questions: questionPorts, permissions }))
+      .then(() => registerMemoryRpc(ctx.rpc, memoryPorts))
       .catch((error: unknown) => log(`courier rpc: not registered, the TUI part shows nothing and cannot stop: ${String(error)}`))
-    await ctx.session.hook("context", (event) => shapeContext({ storage: ctx.storage, limits, roles, log }, event))
+    await ctx.session.hook("context", (event) => shapeContext({ storage: ctx.storage, limits, roles, hiddenFromLeaf: [RECALL_TOOL, NOTE_TOOL], log }, event))
 
     const pruned = pruneExpired(ctx.storage, Date.now()).catch((error: unknown) => log(`courier roster prune: ${String(error)}`))
+    const swept = sweepRecords(ctx.storage, Date.now()).catch((error: unknown) => log(`courier memory sweep: ${String(error)}`))
+    // The windows the memory reads each part's context use by; a tree whose top runs in a location with memory off is not recorded.
+    const windowed = ports
+      .windows()
+      .then((windows) => windows.forEach((window) => memoryState.windows.set(`${window.providerID}/${window.id}`, window)))
+      .catch((error: unknown) => log(`courier memory: cannot list the models' context windows: ${String(error)}`))
+    if (!memory) memoryState.off.add(ctx.location.directory)
     const leaveRelay = joinRelay(questionPorts)
     const noticed = noticeCutOff(questionPorts).catch((error: unknown) =>
       questionPorts.log(`courier question: stored questions: ${String(error)}`),
@@ -221,11 +245,14 @@ export const courier = () => Plugin.define({
     // The leave waits for them, so they do not run on against a location that is closing.
     track(member, pruned)
     track(member, noticed)
+    track(member, swept)
+    track(member, windowed)
     const leave = webhook ? joinReceiver(webhook, hooks) : undefined
     return async () => {
       // Waits, for a moment at most, for the work this instance leaves behind, and on the last
       // leave for the scheduler's owner key to be released, so another server takes over at once.
       const leftHub = leaveHub()
+      if (!memory) memoryState.off.delete(ctx.location.directory)
       leaveRelay()
       await leave?.()
       await leftHub

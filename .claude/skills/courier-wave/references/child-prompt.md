@@ -20,12 +20,16 @@ first; its "Done when" is your acceptance bar.
   both sides; never rebase or force-push.
 
 ## How to work
-- Follow CLAUDE.md: read README.md, docs/reference.md and docs/maintainers/plugin-api-notes.md first, read the pinned
-  plugin API's types instead of guessing, and run typecheck, unit tests, build and the live e2e
-  test before every push. Add an e2e scenario for the new behaviour.
+- Follow CLAUDE.md: read README.md, docs/reference.md and docs/maintainers/plugin-api-notes.md first, and read the pinned
+  plugin API's types instead of guessing. Before every push run `bun run typecheck` and the test
+  files you touch or add, nothing more: CI runs the whole unit suite, the build and the live e2e
+  test, so don't run those locally. The exception is CLAUDE.md's real-model smoke test after a
+  change to a model-facing string, which CI does not run. Still add the e2e checks the issue's
+  "Done when" asks for.
 - Work on branch <issue-N-slug> in small, well-described commits. Open a PR to main whose body
-  says what changed, the decisions you made, how it was tested, and `Closes #<N>`. Never push to
-  main and never merge.
+  says what changed, the decisions you made, how it was tested, and `Closes #<N>`. Open it ready
+  for review, never as a draft, and mark it ready at once if your session opened it as one: the
+  code review plugin does not review a draft. Never push to main and never merge.
 - Get CI green on the PR head. Then review the PR with the code review plugin: the
   `code-review:code-review` skill with the PR number, not the built-in `code-review` skill. It
   posts its findings on the PR as a `### Code review` comment, and posts nothing when no finding
@@ -33,7 +37,7 @@ first; its "Done when" is your acceptance bar.
   is blocked in cloud sessions). Fix what it finds, re-run the checks and push. A behaviour change
   after that round gets another round; tell the plugin its earlier comment covers an older head,
   or it skips the PR as already reviewed.
-- Update README.md in the same PR.
+- Update README.md and docs/reference.md in the same PR.
 
 ## Talking to the orchestrator
 End a turn that needs the orchestrator with one of these blocks, and also send the same block
