@@ -246,6 +246,39 @@ describe("remote node configuration and addresses", () => {
     expect(interrupted).toBe(true)
   })
 
+  test("a prepared remote reservation can only be recovered by its exact Head Unit", async () => {
+    const root = mkdtempSync(join(tmpdir(), "courier-remote-"))
+    const secretFile = join(root, "shared.key")
+    writeFileSync(secretFile, "pairwise secret")
+    const remote = readRemoteConfig({ remoteNodes: { nodeId: "worker", peers: { head: { url: "http://head:4097", secretFile, allowedRoots: [root] } } } })!
+    let interrupted = false
+    const session = {
+      get: async () => ({
+        id: "ses_prepared",
+        metadata: { courier: { remotePreparedBy: "head", remotePreparedRepo: true, remoteRootSessionID: "head/ses_owner", assignmentID: "assignment_1" } },
+        time: { created: 1, updated: 2, idle: 2 },
+      }),
+      interrupt: async () => (interrupted = true, { interrupted: true }),
+      wait: async () => {},
+    }
+    const ports: any = {
+      remote,
+      session,
+      gate: { assignments: new Map([["assignment_1", { assignmentID: "assignment_1", sessionID: "ses_prepared" }]]) },
+      storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+      log: () => {},
+    }
+    const envelope = (parentID: string) => ({ version: 1 as const, id: "r1", sender: "head", operation: "abortPreparedRepo", payload: { sessionID: "ses_prepared", parentID } })
+
+    await expect(handleRemote(ports, ports, envelope("ses_other"))).rejects.toThrow("does not belong to this Head Unit")
+    expect(interrupted).toBe(false)
+    expect((ports.gate.assignments as Map<string, any>).get("assignment_1").closed).toBeUndefined()
+
+    await expect(handleRemote(ports, ports, envelope("ses_owner"))).resolves.toMatchObject({ stopped: true, retainedWorkspace: true })
+    expect(interrupted).toBe(true)
+    expect((ports.gate.assignments as Map<string, any>).get("assignment_1").closed).toBe(true)
+  })
+
   test("does not start a prepared remote session when the Head Unit cannot record it", async () => {
     const root = mkdtempSync(join(tmpdir(), "courier-remote-"))
     const secretFile = join(root, "shared.key")

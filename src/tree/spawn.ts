@@ -1,4 +1,5 @@
 import { describeFailure } from "../kernel/protocol.js"
+import { obj } from "../platform/json.js"
 import { busy, isGroupName } from "./domain.js"
 import { joinGroup, leaveGroup } from "./group.js"
 import { admit } from "./limits.js"
@@ -62,7 +63,25 @@ export async function spawn(ports: CourierPorts, parentID: string, input: SpawnI
   if (group !== undefined && !isGroupName(group))
     throw new Error(`group must be a name of 1 to 60 letters, digits, dots, dashes or underscores, not ${JSON.stringify(group)}.`)
   const parent = await childStore(ports.storage).indexedEntry(parentID)
-  if (parent) throw new Error("Courier workers cannot start child sessions; ask the Head Unit to dispatch the work")
+  let projectID = ports.projectID
+  let parentCourier: Record<string, unknown> = {}
+  try {
+    const parentSession = await ports.session.get({ sessionID: parentID })
+    projectID = parentSession.projectID
+    parentCourier = obj(obj(parentSession.metadata).courier)
+  } catch (error) {
+    if (ports.repoMap || input.repo) throw error
+  }
+  if (parent || parentCourier.managed === true || typeof parentCourier.remotePreparedBy === "string")
+    throw new Error("Courier workers cannot start child sessions; ask the Head Unit to dispatch the work")
+  const identity = createIdentityManager(ports.storage)
+  const registeredRoot = await identity.get(parentID, projectID)
+  if (ports.repoMap && !registeredRoot)
+    throw new Error("Register this user-facing session with courier_session before spawning from the configured repo map")
+  if (registeredRoot && !input.repo)
+    throw new Error("Registered Courier Head Units must spawn with an explicit repo, branch and checkout intent")
+  if (ports.repoMap && !input.repo)
+    throw new Error("repoMapFile mode requires explicit repo, branch and checkout intents; legacy spawn is disabled")
   if (input.repo) return spawnRepository(ports, parentID, input, group)
   if (input.peer !== undefined || input.directory !== undefined || input.workName !== undefined) {
     if (!input.peer || !input.directory || !input.workName?.trim())
@@ -208,9 +227,10 @@ async function spawnRemoteRepository(
   if (!repository.peer) throw new Error("selected remote repository is missing its peer identity")
   const peer = repository.peer
   const admitted = await admit(ports, parentID)
+  let prepared: (PreparedRemote & { sourceDirectory: string; assignmentID: string; branch: string; baseCommit: string; dirty: boolean; worktreeId?: string }) | undefined
   try {
     const parent = await ports.session.get({ sessionID: parentID }).catch(() => undefined)
-    const prepared = await remoteRequest<PreparedRemote & { sourceDirectory: string; assignmentID: string; branch: string; baseCommit: string; dirty: boolean; worktreeId?: string }>(ports, peer, "prepareRepo", {
+    prepared = await remoteRequest<PreparedRemote & { sourceDirectory: string; assignmentID: string; branch: string; baseCommit: string; dirty: boolean; worktreeId?: string }>(ports, peer, "prepareRepo", {
       repo: { host: repository.host, name: repository.name, repoId: repository.repoId },
       workName,
       root,
@@ -247,12 +267,7 @@ async function spawnRemoteRepository(
       ...(group ? { group } : {}),
     }
     const { rosterError, groupError } = await enrol(ports, entry, group)
-    if (rosterError) {
-      await remoteRequest(ports, peer, "abortPreparedRepo", { sessionID: prepared.sessionID, parentID: root.sessionID }).catch((error: unknown) =>
-        ports.log(`courier_spawn: unrecorded remote worker ${sessionID} remains assigned because it could not be stopped: ${String(error)}`),
-      )
-      throw new Error(`remote worker was prepared but could not be recorded: ${rosterError}`)
-    }
+    if (rosterError) throw new Error(`remote worker was prepared but could not be recorded: ${rosterError}`)
     ports.gate.assignments?.set(prepared.assignmentID, {
       assignmentID: prepared.assignmentID,
       reservationKey: `${peer}\0${repository.repoId}\0${prepared.branch}`,
@@ -278,6 +293,25 @@ async function spawnRemoteRepository(
       assignmentID: prepared.assignmentID,
       ...(group && !groupError ? { group } : {}),
     }
+  } catch (error) {
+    if (prepared) {
+      const sessionID = qualify(peer, prepared.sessionID)
+      try {
+        const stopped = await remoteRequest<{ stopped: true }>(ports, peer, "abortPreparedRepo", {
+          sessionID: prepared.sessionID,
+          parentID: root.sessionID,
+        })
+        if (!stopped.stopped) throw new Error("peer did not confirm the prepared worker stopped")
+        await releaseWorkspace(ports.gate, prepared.assignmentID, true)
+      } catch (abortError) {
+        const original = error instanceof Error ? error.message : String(error)
+        const stop = abortError instanceof Error ? abortError.message : String(abortError)
+        throw new Error(
+          `Remote worker ${sessionID} remains assigned after spawn failed (${original}); Courier could not confirm its stop (${stop}). Retry courier_close for ${sessionID} when the peer is reachable.`,
+        )
+      }
+    }
+    throw error
   } finally {
     admitted.release()
   }

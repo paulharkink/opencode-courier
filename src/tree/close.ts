@@ -36,7 +36,26 @@ export async function close(ports: ClosePorts, callerID: string, targetID: strin
   }
 
   const entry = await childStore(ports.courier.storage).indexedEntry(targetID)
-  if (!entry) throw new Error(`${targetID} is not a Courier worker session.`)
+  if (!entry) {
+    const remote = root ? remoteTarget(ports.courier, targetID) : undefined
+    if (remote) {
+      const stopped = await remoteRequest<{ stopped: true }>(ports.courier, remote.nodeId, "abortPreparedRepo", {
+        sessionID: remote.sessionID,
+        parentID: callerID,
+      })
+      if (!stopped.stopped) throw new Error(`Courier could not confirm ${targetID} stopped; its assignment remains owned.`)
+      const assignment = [...(ports.courier.gate.assignments?.values() ?? [])].find((item) => item.sessionID === targetID)
+      if (assignment) await releaseWorkspace(ports.courier.gate, assignment.assignmentID, true)
+      return {
+        closedSessionIDs: [targetID],
+        releasedAssignments: assignment ? [assignment.assignmentID] : [],
+        errors: [],
+        rootClosed: false,
+        retainedWorkspaces: true,
+      }
+    }
+    throw new Error(`${targetID} is not a Courier worker session.`)
+  }
   const lineage = await childStore(ports.courier.storage).lineage(targetID)
   if (!lineage.some((item) => item.parentID === callerID || (root && item.rootSessionID === root.sessionID)))
     throw new Error(`${callerID} is not the Head Unit or an owner above ${targetID}.`)

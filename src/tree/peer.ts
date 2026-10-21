@@ -17,7 +17,12 @@ import { releaseWorkspace } from "./workspace.js"
 const MAX_TASK = 40_000
 const WORK_NAME = /^[^\r\n]{1,120}$/
 
-export async function handleRemote(ports: CourierPorts, cleanupPorts: CleanupPorts, request: RemoteEnvelope) {
+export async function handleRemote(
+  ports: CourierPorts,
+  cleanupPorts: CleanupPorts,
+  request: RemoteEnvelope,
+  cancelScheduled?: (sessionID: string) => Promise<ReadonlyArray<string>>,
+) {
   const input = obj(request.payload)
   switch (request.operation) {
     case "repositories": {
@@ -30,7 +35,7 @@ export async function handleRemote(ports: CourierPorts, cleanupPorts: CleanupPor
     case "prepareRepo":
       return prepareRepo(ports, request.sender, input)
     case "abortPreparedRepo":
-      return abortPreparedRepo(ports, request.sender, input)
+      return abortPreparedRepo(ports, request.sender, input, cancelScheduled)
     case "start":
       return start(ports, request.sender, input)
     case "send":
@@ -72,7 +77,12 @@ export async function handleRemote(ports: CourierPorts, cleanupPorts: CleanupPor
   }
 }
 
-async function abortPreparedRepo(ports: CourierPorts, sender: string, input: Record<string, any>) {
+async function abortPreparedRepo(
+  ports: CourierPorts,
+  sender: string,
+  input: Record<string, any>,
+  cancelScheduled?: (sessionID: string) => Promise<ReadonlyArray<string>>,
+) {
   const sessionID = requiredString(input.sessionID, "sessionID")
   const session = await ports.session.get({ sessionID })
   const courier = obj(obj(session.metadata).courier)
@@ -85,6 +95,8 @@ async function abortPreparedRepo(ports: CourierPorts, sender: string, input: Rec
   await ports.session.wait({ sessionID })
   const latest = await ports.session.get({ sessionID })
   if (busy(latest.time)) throw new Error("prepared worker did not stop; assignment remains owned")
+  await cancelScheduled?.(sessionID).catch((error: unknown) => ports.log(`courier_close: scheduled messages for ${sessionID} remain: ${String(error)}`))
+  await forgetWakes(ports, sessionID).catch((error: unknown) => ports.log(`courier_close: wake state for ${sessionID} remains: ${String(error)}`))
   if (typeof courier.assignmentID === "string") await releaseWorkspace(ports.gate, courier.assignmentID, true)
   return { stopped: true as const, retainedWorkspace: true as const }
 }

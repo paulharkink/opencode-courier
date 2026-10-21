@@ -206,7 +206,7 @@ export const courier = () => Plugin.define({
       session: ctx.session,
       now: Date.now,
       log: later.log,
-      ...(remote ? { remote: { config: remote, handle: (request) => handleRemote(ports, cleanupPorts, request) } } : {}),
+      ...(remote ? { remote: { config: remote, handle: (request) => handleRemote(ports, cleanupPorts, request, (sessionID) => cancelScheduled(later, sessionID)) } } : {}),
     }
     let webhook: WebhookConfig | undefined
     try {

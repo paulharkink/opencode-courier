@@ -232,7 +232,7 @@ export function addTreeTools(tools: ToolEditor, ports: TreeToolPorts) {
       "report, or each group's reports, starts a new turn in which you carry on. For a repo-map assignment, register this " +
       "session with courier_session first, then choose an advertised repository and supply explicit branch and checkout intents. " +
       "Creating a branch requires its exact name and base; creating a worktree requires an exact destination under the advertised worktreeRoot. " +
-      "Workers must ask this Head Unit to dispatch sibling work. Legacy bare-directory spawns remain available for un-managed sessions. " +
+      "Workers must ask this Head Unit to dispatch sibling work. Legacy bare-directory spawns are only available to unregistered sessions when no repo map is configured. " +
       "For a remote legacy session, give its configured peer, absolute source directory and workName. Its stable ID is nodeId/sessionID. " +
       "For long tasks, also courier_later a " +
       "check-in for yourself in case it never reports, and courier_cancel it when it does.",
