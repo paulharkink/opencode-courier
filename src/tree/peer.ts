@@ -9,7 +9,7 @@ import { status } from "./status.js"
 import { cleanup } from "./cleanup.js"
 import { send } from "./send.js"
 import { forgetWakes } from "./wake.js"
-import { listLocalRepositories } from "./repos.js"
+import { listLiveLocalRepositories } from "./repos.js"
 import { busy } from "./domain.js"
 import { acquireWorkspace } from "./workspace.js"
 import { releaseWorkspace } from "./workspace.js"
@@ -28,7 +28,7 @@ export async function handleRemote(
     case "repositories": {
       const query = input.query === undefined ? undefined : requiredString(input.query, "query")
       if (query && query.length > 200) throw new Error("query is too long")
-      return { repositories: listLocalRepositories(ports.repoMap, query), ...(ports.repoMap?.worktreeRoot ? { worktreeRoot: ports.repoMap.worktreeRoot } : {}) }
+      return { repositories: await listLiveLocalRepositories(ports.repoMap, query), ...(ports.repoMap?.worktreeRoot ? { worktreeRoot: ports.repoMap.worktreeRoot } : {}) }
     }
     case "prepare":
       return prepare(ports, request.sender, input)
@@ -109,7 +109,7 @@ async function prepareRepo(ports: CourierPorts, sender: string, input: Record<st
   const host = requiredString(repo.host, "repo.host")
   const name = requiredString(repo.name, "repo.name")
   const repoId = requiredString(repo.repoId, "repo.repoId")
-  const candidate = listLocalRepositories(ports.repoMap).find((item) => item.host === host && item.name === name && item.repoId === repoId)
+  const candidate = (await listLiveLocalRepositories(ports.repoMap)).find((item) => item.host === host && item.name === name && item.repoId === repoId)
   if (!candidate) throw new Error("repository is not in this node's local inventory")
   if (!(await withinRoots(candidate.path, peer.allowedRoots))) throw new Error("repository is outside this peer's allowed roots")
   const workName = requiredString(input.workName, "workName").trim()

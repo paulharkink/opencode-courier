@@ -9,6 +9,7 @@ import { SKILL_ID, SPLIT_LINE } from "../src/kernel/protocol.js"
 import { childBrief, depthRefusal, childrenRefusal, ROLE_PREFIX, rolePart, totalRefusal } from "../src/tree/text.js"
 import { reportOf } from "../src/tree/report.js"
 import { childStore } from "../src/tree/store.js"
+import { createIdentityManager } from "../src/tree/session.js"
 
 /** Whether a spawned session owes its parent a report, as `reportOf` reads it. */
 const owesReport = async (storage: Parameters<typeof childStore>[0], sessionID: string) => (await reportOf(childStore(storage), sessionID))?.owes
@@ -437,6 +438,17 @@ describe("the context hook", () => {
     expect(event.system[1]!.text).toStartWith(ROLE_PREFIX)
     expect(event.system[1]!.text).toContain(SKILL_ID)
     expect(event.system[1]!.text).toContain(SPLIT_LINE)
+  })
+
+  test("gives a registered Head Unit explicit dispatch and group dependency guidance", async () => {
+    const { ports, storage, shape } = contextPorts()
+    ;(ports as any).session = { get: async () => ({ id: "ses_head", projectID: "project-a" }) }
+    await createIdentityManager(storage).register("ses_head", "project-a", "Polyrepo")
+
+    const event = await shape("ses_head")
+    expect(event.system[1]!.text).toContain('Courier Head Unit "Polyrepo"')
+    expect(event.system[1]!.text).toContain("relay your decision")
+    expect(event.system[1]!.text).toContain("grouped final reports wait for every member")
   })
 
   test("points no session that cannot spawn, such as one whose agent lacks the courier tools", async () => {

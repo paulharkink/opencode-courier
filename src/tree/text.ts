@@ -84,11 +84,13 @@ export const ROLE_PREFIX = "opencode-courier role:"
  * The system part naming a session's place in its tree: `depth` 0 for a session nobody spawned that
  * has started one, `null` for one that has started none, which is pointed to the skill. The same on every request.
  */
-export function rolePart(depth: number | null, limits: Limits, managedWorker = false) {
+export function rolePart(depth: number | null, limits: Limits, managedWorker = false, headUnitName?: string) {
   const { maxDepth, maxChildren, maxTotal } = limits
   const budget = `At most ${maxChildren} of the sessions you start run at once, and ${maxTotal} in the whole tree.`
   if (managedWorker)
     return `${ROLE_PREFIX} managed worker. You cannot start Courier sessions; ask the Head Unit to dispatch sibling work. Report blocked to the Head Unit if you need a decision or another worker.`
+  if (headUnitName)
+    return `${ROLE_PREFIX} Courier Head Unit ${JSON.stringify(headUnitName)}. Before a multi-file task, load the ${SKILL_ID} skill and recall once. You dispatch all managed workers yourself because managed workers cannot start Courier sessions. When a worker reports blocked, relay your decision to it with courier_send; start any needed follow-up sibling work yourself. Use a group only for independent tasks that can finish without another worker's report, your decision or a follow-up dispatch; grouped final reports wait for every member.`
   if (depth === null)
     return (
       `${ROLE_PREFIX} root, no sessions started yet. Before a task that touches several files or areas, load the ` +
@@ -162,6 +164,8 @@ export function spawnText(child: {
   readonly sourceDirectory?: string
   readonly isolated?: boolean
   readonly workName?: string
+  readonly worktreeId?: string
+  readonly branch?: string
   readonly group?: string
   readonly rosterError?: string
   readonly groupError?: string
@@ -183,8 +187,9 @@ export function spawnText(child: {
   const location = child.isolated && child.sourceDirectory
     ? `in isolated worktree ${child.directory}, based on source directory ${child.sourceDirectory}. Do file work in the worktree at ${child.directory}; changes stay separate from the source directory until you merge them.`
     : `in ${child.directory}`
+  const checkout = child.worktreeId ? ` Branch ${child.branch ?? ""} is available as worktreeId "${child.worktreeId}".` : ""
   return (
-    `Started session ${child.sessionID} ${location}${child.workName ? ` for workName "${child.workName}"` : ""}. ${reports} Once you have started every session you need, ` +
+    `Started session ${child.sessionID} ${location}${child.workName ? ` for workName "${child.workName}"` : ""}.${checkout} ${reports} Once you have started every session you need, ` +
     `end your turn: reply without calling more tools. That does not drop the task; you carry on with it when the reports arrive.${warning}`
   )
 }

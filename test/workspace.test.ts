@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createHash } from "node:crypto"
+import { listRepositories } from "../src/tree/repos.js"
 import type { SpawnGate } from "../src/tree/ports.js"
 import type { RepositoryCandidate } from "../src/tree/repos.js"
 import { acquireWorkspace, releaseWorkspace } from "../src/tree/workspace.js"
@@ -75,6 +76,48 @@ describe("repo workspace assignment", () => {
     expect(assignment.branch).toBe("feature/explicit-name")
     expect(execFileSync("git", ["-C", destination, "branch", "--show-current"], { encoding: "utf8" }).trim()).toBe("feature/explicit-name")
     expect(execFileSync("git", ["-C", destination, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()).toBe(base)
+  })
+
+  test("discovers a created checkout, blocks a second owner, then reuses it after close without refreshing AACT", async () => {
+    const f = fixture()
+    const destination = join(f.worktreeRoot, "explicit-checkout")
+    const created = await acquireWorkspace({ gate: f.gate, nodeId: "node-a", worktreeRoot: f.worktreeRoot }, {
+      rootSessionID: "root-session",
+      ownerSessionID: "worker-one",
+      repository: f.candidate,
+      branch: { mode: "create", name: "feature/explicit-name", base: "HEAD" },
+      checkout: { mode: "create-worktree", directory: destination },
+    })
+    const result = await listRepositories({
+      repoMap: {
+        version: 1,
+        nodeId: "node-a",
+        worktreeRoot: f.worktreeRoot,
+        repositories: [{
+          host: f.candidate.host,
+          name: f.candidate.name,
+          path: f.repo,
+          repoId: f.candidate.repoId,
+          worktrees: [{ worktreeId: hash(realpathSync(f.repo)), branch: "main", kind: "main", dirty: false }],
+        }],
+        peers: [],
+      },
+    })
+    const known = result.repositories[0]?.worktrees.find((worktree) => worktree.path === realpathSync(destination))
+    expect(known).toMatchObject({ worktreeId: hash(realpathSync(destination)), branch: "feature/explicit-name", kind: "worktree" })
+    const reuse = {
+      rootSessionID: "root-session",
+      ownerSessionID: "worker-two",
+      repository: { ...f.candidate, worktrees: result.repositories[0]!.worktrees },
+      branch: { mode: "existing" as const, name: "feature/explicit-name" },
+      checkout: { mode: "existing-worktree" as const, worktreeId: known!.worktreeId },
+    }
+    await expect(acquireWorkspace({ gate: f.gate, nodeId: "node-a", worktreeRoot: f.worktreeRoot }, reuse)).rejects.toThrow("already assigned")
+    await releaseWorkspace(f.gate, created.assignmentID, true)
+    await expect(acquireWorkspace({ gate: f.gate, nodeId: "node-a", worktreeRoot: f.worktreeRoot }, reuse)).resolves.toMatchObject({
+      directory: realpathSync(destination),
+      worktreeId: hash(realpathSync(destination)),
+    })
   })
 
   test("rejects checkout paths outside the explicitly configured worktree root", async () => {

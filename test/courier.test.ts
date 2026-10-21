@@ -1,4 +1,9 @@
 import { describe, expect, spyOn, test } from "bun:test"
+import { execFileSync } from "node:child_process"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { createHash } from "node:crypto"
 import { spawn } from "../src/tree/spawn.js"
 import { send } from "../src/tree/send.js"
 import { listChildren, status } from "../src/tree/status.js"
@@ -10,6 +15,7 @@ import { joinGroup } from "../src/tree/group.js"
 import { childStore, groupStore, memberKey, progressKey, rosterKey, settledKey } from "../src/tree/store.js"
 import { createIdentityManager } from "../src/tree/session.js"
 import { close } from "../src/tree/close.js"
+import { spawnText } from "../src/tree/text.js"
 
 type Call = { method: string; input: any }
 
@@ -88,6 +94,47 @@ describe("spawn", () => {
 
     await expect(spawn(ports, "ses_parent", { task: "t", isolate: true })).rejects.toThrow("Registered Courier Head Units must spawn")
     expect(afterLookups(calls)).toEqual([])
+  })
+
+  test("returns the canonical worktreeId from a repo-map spawn", async () => {
+    const root = mkdtempSync(join(tmpdir(), "courier-spawn-worktree-id-"))
+    try {
+      const repo = join(root, "repo")
+      const worktreeRoot = join(root, "worktrees")
+      mkdirSync(repo)
+      mkdirSync(worktreeRoot)
+      execFileSync("git", ["init", "-b", "main", repo])
+      execFileSync("git", ["-C", repo, "config", "user.name", "Courier Test"])
+      execFileSync("git", ["-C", repo, "config", "user.email", "courier@example.invalid"])
+      writeFileSync(join(repo, "README.md"), "test\n")
+      execFileSync("git", ["-C", repo, "add", "README.md"])
+      execFileSync("git", ["-C", repo, "commit", "-m", "init"])
+      const common = realpathSync(join(repo, execFileSync("git", ["-C", repo, "rev-parse", "--git-common-dir"], { encoding: "utf8" }).trim()))
+      const hash = (value: string) => createHash("sha256").update(value).digest("hex")
+      const { ports } = fakePorts({ info: { projectID: "proj_1" } })
+      ;(ports as any).repoMap = {
+        version: 1,
+        nodeId: "node-a",
+        worktreeRoot,
+        repositories: [{ host: "github.com", name: "team/repo", path: repo, repoId: hash(common), worktrees: [{ worktreeId: hash(realpathSync(repo)), branch: "main", kind: "main", dirty: false }] }],
+        peers: [],
+      }
+      ;(ports.gate as any).assignments = new Map()
+      await createIdentityManager(ports.storage).register("ses_parent", "proj_1", "Polyrepo")
+      const destination = join(worktreeRoot, "chosen")
+      const child = await spawn(ports, "ses_parent", {
+        task: "write a test",
+        workName: "Tests",
+        repo: { host: "github.com", name: "team/repo", repoId: hash(common) },
+        branch: { mode: "create", name: "feature/tests", base: "HEAD" },
+        checkout: { mode: "create-worktree", directory: destination },
+      })
+
+      expect(child).toMatchObject({ worktreeId: hash(realpathSync(destination)), branch: "feature/tests" })
+      expect(spawnText(child)).toContain(`worktreeId "${hash(realpathSync(destination))}"`)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test("a prepared remote worker is interrupted and released when starting it fails", async () => {

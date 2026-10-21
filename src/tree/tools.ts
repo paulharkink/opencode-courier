@@ -37,7 +37,7 @@ export const SpawnInput = Schema.Struct({
       description:
         "A join group: start the sessions of one batch with the same name, and their reports are held and delivered " +
         "to you in one message once every one of them has reported and your turn has ended, instead of one turn per " +
-        "report. A blocked report, a question, a permission request or a failed turn still reaches you at once. Letters, " +
+        "report. Use groups only for independent tasks that can finish without another worker's report, your decision or a follow-up dispatch; leave dependent work ungrouped. A blocked report, a question, a permission request or a failed turn still reaches you at once. Letters, " +
         "digits, dots, dashes and underscores, up to 60; the name is free again once the group has been delivered.",
     }),
   ),
@@ -227,7 +227,7 @@ export function addTreeTools(tools: ToolEditor, ports: TreeToolPorts) {
       "Start a new OpenCode session on a task and return immediately. It runs on your model. The session reports " +
       "back with courier_send, which wakes this session, and you are told if its turn fails or ends without a report " +
       "instead, it waits for a permission or it asks a question. Give a batch of parallel sessions one group name to " +
-      "be woken once, with all their reports, instead of once per report. DO NOT poll it or call courier_status in a " +
+      "be woken once, with all their reports, instead of once per report. Group only independent tasks that can finish without another report, a Head decision or follow-up dispatch; grouped final reports wait for every member. Leave dependent tasks ungrouped. DO NOT poll it or call courier_status in a " +
       "loop: once you have started the sessions you need, end your turn by replying without calling more tools; each " +
       "report, or each group's reports, starts a new turn in which you carry on. For a repo-map assignment, register this " +
       "session with courier_session first, then choose an advertised repository and supply explicit branch and checkout intents. " +

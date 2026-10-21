@@ -26,15 +26,19 @@ export const SKILL_CONTENT = [
     "committed diff against the task and the repository's rules and reports its findings (isolate: false, it edits nothing). " +
     "Weigh each of them. When the other parts depend on names and texts the core fixes, split in stages: the core first, " +
     "yourself when it is small or by one session when it is big, merged and committed before the rest start; then, if 2 or " +
-    "more parts remain, one session per remaining part, in one group. A part that is itself big and divisible is split again " +
+    "more parts remain, one session per remaining part. Keep dependent parts ungrouped so you can relay decisions and dispatch " +
+    "follow-up work. A part that is itself big and divisible is split again " +
     "by the session that gets it; at the deepest level a session does its part itself. " +
     `Say which in one line of your reply, before you start: ${SPLIT_LINE}, so that a reasoned decision to do it ` +
     "yourself can be told from one never made.",
   "2. Plan the parts so that no two edit the same files. Write each task so the session can do it without you: what to " +
     "produce and where, how to check it, what to report. Say if it may split its part further, and to run its checks " +
     "through the project's scripts (step 6): each permission request of a session below you wakes you and waits on the person.",
-  "3. Start them: one courier_spawn per part, all with the same group name, so you are woken once with every report; " +
-    "isolate: true for each part that edits files in parallel with another (commit your own work first if you are isolated " +
+  "3. Start them: one courier_spawn per part. Use the same group only for independent tasks that can finish without another " +
+    "worker's report, a decision or a follow-up dispatch. A group's done, partial and failed reports are held until every member " +
+    "reports; blocked reports and questions arrive immediately. Leave group out for dependent work so you can relay a report, " +
+    "answer a blocked worker and start a follow-up sibling yourself. Isolate: true for each part that edits files in parallel " +
+    "with another (commit your own work first if you are isolated " +
     "yourself). For long work, courier_later a check-in for yourself, and courier_cancel it when the reports arrive.",
   "4. End your turn: reply without calling more tools. Do not poll with courier_status, courier_children, courier_tree or " +
     "sleep. The group's reports, a blocked report, a question, a permission request, a failed turn or a silent end each start " +

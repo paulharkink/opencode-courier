@@ -122,6 +122,7 @@ describe("tool results", () => {
     expect(tree.spawnText({ sessionID: "ses_child", directory: "/wt", rosterError: "roster failed: disk full" })).toMatchSnapshot()
     expect(tree.spawnText({ sessionID: "ses_child", directory: "/repo", group: "reviews" })).toMatchSnapshot()
     expect(tree.spawnText({ sessionID: "ses_child", directory: "/repo", groupError: "group failed: disk full" })).toMatchSnapshot()
+    expect(tree.spawnText({ sessionID: "ses_child", directory: "/worktrees/task", branch: "feature/task", worktreeId: "sha256:worktree-id" })).toContain('worktreeId "sha256:worktree-id"')
   })
   test("spawnText for a child started from its parent's HEAD", () => {
     expect(tree.spawnText({ sessionID: "ses_child", directory: "/wt", fromParent: true })).toMatchSnapshot()

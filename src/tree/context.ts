@@ -2,6 +2,7 @@ import { setBounded } from "../platform/bounded.js"
 import type { ContextPorts } from "./ports.js"
 import { childStore } from "./store.js"
 import { ROLE_PREFIX, rolePart } from "./text.js"
+import { createIdentityManager } from "./session.js"
 
 /** How many sessions' depths an instance remembers. */
 const ROLES_MAX = 1000
@@ -22,13 +23,24 @@ export async function shapeContext(ports: ContextPorts, event: Shaped) {
   try {
     const depth = await depthOf(ports, event.sessionID)
     const worker = depth !== null && depth > 0 ? await childStore(ports.storage).indexedEntry(event.sessionID) : undefined
+    const headUnitName = await registeredHeadName(ports, event.sessionID)
     if (depth === null && !event.tools.courier_spawn) return
     if (worker || (depth !== null && depth >= ports.limits.maxDepth))
       for (const tool of ["courier_spawn", ...(ports.hiddenFromLeaf ?? [])]) delete event.tools[tool]
     if (!event.system.some((part) => part.text.startsWith(ROLE_PREFIX)))
-      event.system.push({ type: "text", text: rolePart(depth, ports.limits, Boolean(worker)) })
+      event.system.push({ type: "text", text: rolePart(depth, ports.limits, Boolean(worker), headUnitName) })
   } catch (error) {
     ports.log(`courier: cannot tell the role of session ${event.sessionID}: ${String(error)}`)
+  }
+}
+
+async function registeredHeadName(ports: ContextPorts, sessionID: string) {
+  if (!ports.session) return undefined
+  try {
+    const session = await ports.session.get({ sessionID })
+    return (await createIdentityManager(ports.storage).get(sessionID, session.projectID))?.name
+  } catch {
+    return undefined
   }
 }
 

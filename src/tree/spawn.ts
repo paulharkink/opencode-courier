@@ -192,6 +192,7 @@ async function spawnRepository(ports: CourierPorts, parentID: string, input: Spa
       workName,
       dirty: assignment.dirty,
       assignmentID: assignment.assignmentID,
+      ...(assignment.worktreeId ? { worktreeId: assignment.worktreeId } : {}),
       ...(group && !groupError ? { group } : {}),
     }
   } catch (error) {
@@ -291,6 +292,7 @@ async function spawnRemoteRepository(
       workName,
       dirty: prepared.dirty,
       assignmentID: prepared.assignmentID,
+      ...(prepared.worktreeId ? { worktreeId: prepared.worktreeId } : {}),
       ...(group && !groupError ? { group } : {}),
     }
   } catch (error) {
