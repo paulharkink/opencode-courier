@@ -28,7 +28,11 @@ export async function handleRemote(
     case "repositories": {
       const query = input.query === undefined ? undefined : requiredString(input.query, "query")
       if (query && query.length > 200) throw new Error("query is too long")
-      return { repositories: await listLiveLocalRepositories(ports.repoMap, query), ...(ports.repoMap?.worktreeRoot ? { worktreeRoot: ports.repoMap.worktreeRoot } : {}) }
+      const peer = ports.remote?.peers[request.sender]
+      if (!peer) throw new Error("requesting node is not configured")
+      const repositories = await listLiveLocalRepositories(ports.repoMap, query, peer.allowedRoots)
+      const canUseWorktreeRoot = ports.repoMap?.worktreeRoot && await withinRoots(ports.repoMap.worktreeRoot, peer.allowedRoots)
+      return { repositories, ...(canUseWorktreeRoot ? { worktreeRoot: ports.repoMap!.worktreeRoot } : {}) }
     }
     case "prepare":
       return prepare(ports, request.sender, input)
@@ -109,7 +113,7 @@ async function prepareRepo(ports: CourierPorts, sender: string, input: Record<st
   const host = requiredString(repo.host, "repo.host")
   const name = requiredString(repo.name, "repo.name")
   const repoId = requiredString(repo.repoId, "repo.repoId")
-  const candidate = (await listLiveLocalRepositories(ports.repoMap)).find((item) => item.host === host && item.name === name && item.repoId === repoId)
+  const candidate = (await listLiveLocalRepositories(ports.repoMap, undefined, peer.allowedRoots)).find((item) => item.host === host && item.name === name && item.repoId === repoId)
   if (!candidate) throw new Error("repository is not in this node's local inventory")
   if (!(await withinRoots(candidate.path, peer.allowedRoots))) throw new Error("repository is outside this peer's allowed roots")
   const workName = requiredString(input.workName, "workName").trim()
@@ -134,7 +138,7 @@ async function prepareRepo(ports: CourierPorts, sender: string, input: Record<st
   let assignment: Awaited<ReturnType<typeof acquireWorkspace>> | undefined
   try {
     assignment = await acquireWorkspace(
-      { gate: ports.gate, nodeId: ports.repoMap.nodeId, worktreeRoot: ports.repoMap.worktreeRoot },
+      { gate: ports.gate, nodeId: ports.repoMap.nodeId, worktreeRoot: ports.repoMap.worktreeRoot, allowedRoots: peer.allowedRoots },
       { assignmentID, rootSessionID: `${sender}/${rootSessionID}`, ownerSessionID: assignmentID, repository: candidate, branch, checkout },
     )
     const child = await ports.session.create({

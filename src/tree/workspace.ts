@@ -35,6 +35,8 @@ export interface WorkspacePorts {
   readonly gate: SpawnGate
   readonly nodeId: string
   readonly worktreeRoot?: string
+  /** Additional roots granted to the remote peer requesting this assignment. */
+  readonly allowedRoots?: ReadonlyArray<string>
 }
 
 interface GitWorktree {
@@ -89,7 +91,15 @@ function inside(path: string, root: string) {
   return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
 }
 
-async function checkedDestination(directory: string, worktreeRoot: string) {
+async function insideAnyRoot(path: string, roots: ReadonlyArray<string>) {
+  for (const root of roots) {
+    const base = await canonical(root).catch(() => undefined)
+    if (base && (path === base || inside(path, base))) return true
+  }
+  return false
+}
+
+async function checkedDestination(directory: string, worktreeRoot: string, allowedRoots?: ReadonlyArray<string>) {
   if (!isAbsolute(directory)) throw new Error("checkout.directory must be an absolute path")
   if (!existsSync(worktreeRoot)) throw new Error(`configured worktreeRoot does not exist: ${worktreeRoot}`)
   const root = await canonical(worktreeRoot)
@@ -98,6 +108,8 @@ async function checkedDestination(directory: string, worktreeRoot: string) {
   const parent = await canonical(dirname(destination)).catch(() => { throw new Error("checkout.directory parent must already exist") })
   const normalized = resolve(parent, destination.slice(dirname(destination).length + 1))
   if (!inside(normalized, root)) throw new Error("checkout.directory must be inside the configured worktreeRoot")
+  if (allowedRoots && !(await insideAnyRoot(normalized, allowedRoots)))
+    throw new Error("checkout.directory must also be inside this peer's allowedRoots")
   return normalized
 }
 
@@ -188,7 +200,7 @@ export async function acquireWorkspace(ports: WorkspacePorts, request: Workspace
       if (allWorktrees.some((item) => item.branch === branch.name)) throw new Error(`branch ${JSON.stringify(branch.name)} is already checked out; select its existing worktree or checkout.mode=main`)
       base = existingBase
     }
-    createPath = await checkedDestination(checkout.directory, ports.worktreeRoot!)
+    createPath = await checkedDestination(checkout.directory, ports.worktreeRoot!, ports.allowedRoots)
     directory = createPath
     chosenBranch = branch.name
     dirty = false
@@ -203,6 +215,8 @@ export async function acquireWorkspace(ports: WorkspacePorts, request: Workspace
     dirty = actualDirty
     base = await git(directory, ["rev-parse", "HEAD"])
     worktreeId = hash(directory)
+    if (ports.allowedRoots && !(await insideAnyRoot(directory, ports.allowedRoots)))
+      throw new Error("selected checkout is outside this peer's allowedRoots")
   }
 
   const assignmentID = request.assignmentID ?? randomUUID()

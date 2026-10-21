@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createHash } from "node:crypto"
@@ -129,6 +129,44 @@ describe("repo workspace assignment", () => {
       branch: { mode: "create", name: "feature/explicit-name", base: "HEAD" },
       checkout: { mode: "create-worktree", directory: join(f.root, "outside") },
     })).rejects.toThrow("inside the configured worktreeRoot")
+    expect(f.gate.assignments?.size).toBe(0)
+  })
+
+  test("remote peer grants restrict existing worktrees and new destinations before assignment", async () => {
+    const f = fixture()
+    const outside = join(f.root, "outside-worktree")
+    execFileSync("git", ["-C", f.repo, "worktree", "add", "-b", "feature/outside", "--", outside, "HEAD"])
+    const candidate = {
+      ...f.candidate,
+      worktrees: [...f.candidate.worktrees, { worktreeId: hash(realpathSync(outside)), branch: "feature/outside", kind: "worktree" as const, dirty: false, path: outside }],
+    }
+    await expect(acquireWorkspace({ gate: f.gate, nodeId: "node-a", worktreeRoot: f.root, allowedRoots: [f.repo] }, {
+      rootSessionID: "root-session",
+      ownerSessionID: "worker-outside",
+      repository: candidate,
+      branch: { mode: "existing", name: "feature/outside" },
+      checkout: { mode: "existing-worktree", worktreeId: hash(realpathSync(outside)) },
+    })).rejects.toThrow("outside this peer's allowedRoots")
+    expect(f.gate.assignments?.size).toBe(0)
+
+    await expect(acquireWorkspace({ gate: f.gate, nodeId: "node-a", worktreeRoot: f.root, allowedRoots: [f.repo] }, {
+      rootSessionID: "root-session",
+      ownerSessionID: "worker-create-outside",
+      repository: f.candidate,
+      branch: { mode: "create", name: "feature/not-granted", base: "HEAD" },
+      checkout: { mode: "create-worktree", directory: join(f.worktreeRoot, "not-granted") },
+    })).rejects.toThrow("inside this peer's allowedRoots")
+    expect(execFileSync("git", ["-C", f.repo, "branch", "--list", "feature/not-granted"], { encoding: "utf8" }).trim()).toBe("")
+
+    const escaped = join(f.repo, "escape")
+    symlinkSync(f.root, escaped)
+    await expect(acquireWorkspace({ gate: f.gate, nodeId: "node-a", worktreeRoot: f.root, allowedRoots: [f.repo] }, {
+      rootSessionID: "root-session",
+      ownerSessionID: "worker-symlink",
+      repository: f.candidate,
+      branch: { mode: "create", name: "feature/symlink-escape", base: "HEAD" },
+      checkout: { mode: "create-worktree", directory: join(escaped, "outside") },
+    })).rejects.toThrow("inside this peer's allowedRoots")
     expect(f.gate.assignments?.size).toBe(0)
   })
 })

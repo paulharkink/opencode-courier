@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { createHash } from "node:crypto"
+import { execFileSync } from "node:child_process"
 import { readRemoteConfig, qualify, splitQualified, signature } from "../src/platform/remote.js"
 import { receive } from "../src/webhook/receiver.js"
 import type { WebhookPorts } from "../src/webhook/subscriptions.js"
@@ -277,6 +279,45 @@ describe("remote node configuration and addresses", () => {
     await expect(handleRemote(ports, ports, envelope("ses_owner"))).resolves.toMatchObject({ stopped: true, retainedWorkspace: true })
     expect(interrupted).toBe(true)
     expect((ports.gate.assignments as Map<string, any>).get("assignment_1").closed).toBe(true)
+  })
+
+  test("a peer repository listing hides worktrees and destinations outside its grants", async () => {
+    const root = mkdtempSync(join(tmpdir(), "courier-remote-repo-map-"))
+    try {
+      const repo = join(root, "repo")
+      const worktreeRoot = join(root, "managed")
+      mkdirSync(repo)
+      mkdirSync(worktreeRoot)
+      execFileSync("git", ["init", "-b", "main", repo])
+      execFileSync("git", ["-C", repo, "config", "user.name", "Courier Test"])
+      execFileSync("git", ["-C", repo, "config", "user.email", "courier@example.invalid"])
+      writeFileSync(join(repo, "README.md"), "test\n")
+      execFileSync("git", ["-C", repo, "add", "README.md"])
+      execFileSync("git", ["-C", repo, "commit", "-m", "init"])
+      const hash = (value: string) => createHash("sha256").update(value).digest("hex")
+      const common = realpathSync(join(repo, execFileSync("git", ["-C", repo, "rev-parse", "--git-common-dir"], { encoding: "utf8" }).trim()))
+      const main = realpathSync(repo)
+      execFileSync("git", ["-C", repo, "worktree", "add", "-b", "private/task", "--", join(worktreeRoot, "task"), "HEAD"])
+      const secretFile = join(root, "shared.key")
+      writeFileSync(secretFile, "pairwise secret")
+      const remote = readRemoteConfig({ remoteNodes: { nodeId: "worker", peers: { head: { url: "http://head:4097", secretFile, allowedRoots: [repo] } } } })!
+      const ports: any = {
+        remote,
+        repoMap: {
+          version: 1,
+          nodeId: "worker",
+          worktreeRoot,
+          repositories: [{ host: "github.com", name: "team/private", path: repo, repoId: hash(common), worktrees: [{ worktreeId: hash(main), branch: "main", kind: "main", dirty: false }] }],
+          peers: [],
+        },
+      }
+      const listed = await handleRemote(ports, ports, { version: 1, id: "r1", sender: "head", operation: "repositories", payload: {} }) as any
+      expect(listed.repositories).toHaveLength(1)
+      expect(listed.repositories[0].worktrees.map((worktree: any) => worktree.branch)).toEqual(["main"])
+      expect(listed).not.toHaveProperty("worktreeRoot")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test("does not start a prepared remote session when the Head Unit cannot record it", async () => {

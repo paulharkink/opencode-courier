@@ -4,7 +4,7 @@ import { realpath } from "node:fs/promises"
 import { resolve } from "node:path"
 import { promisify } from "node:util"
 import { findGit } from "./cleanup.js"
-import type { RemoteConfig } from "../platform/remote.js"
+import { withinRoots, type RemoteConfig } from "../platform/remote.js"
 import { remoteRequest } from "../platform/remote.js"
 import type { RepoMapRepository, RepoMapV1 } from "./repo-map.js"
 
@@ -44,46 +44,42 @@ async function git(directory: string, args: string[]) {
   return stdout.trim()
 }
 
-async function liveWorktrees(candidate: RepositoryCandidate): Promise<RepositoryCandidate> {
-  try {
-    const source = await realpath(candidate.path)
-    const commonDir = await realpath(resolve(source, await git(source, ["rev-parse", "--git-common-dir"])))
-    if (hash(commonDir) !== candidate.repoId) return candidate
-    const output = await git(source, ["worktree", "list", "--porcelain"])
-    const found: Array<{ path?: string; branch?: string; detached?: boolean }> = []
-    let current: { path?: string; branch?: string; detached?: boolean } = {}
-    const finish = () => {
-      if (current.path) found.push(current)
-      current = {}
-    }
-    for (const line of output.split("\n")) {
-      if (!line) finish()
-      else if (line.startsWith("worktree ")) current.path = line.slice("worktree ".length)
-      else if (line.startsWith("branch ")) current.branch = line.slice("branch ".length).replace(/^refs\/heads\//, "")
-      else if (line === "detached") current.detached = true
-    }
-    finish()
-    const mainPath = await realpath(candidate.worktrees.find((worktree) => worktree.kind === "main")?.path ?? candidate.path)
-    const worktrees: Array<RepositoryCandidate["worktrees"][number]> = []
-    for (const item of found) {
-      if (!item.path || !item.branch) continue
-      const path = await realpath(item.path)
-      const dirty = (await git(path, ["status", "--porcelain"])).length > 0
-      const worktree: RepositoryCandidate["worktrees"][number] = {
-        worktreeId: hash(path),
-        branch: item.branch,
-        kind: path === mainPath ? "main" : "worktree",
-        dirty,
-        path,
-      }
-      worktrees.push(worktree)
-    }
-    if (!worktrees.length) return candidate
-    return { ...candidate, path: mainPath, worktrees }
-  } catch {
-    // A stale or inaccessible configured path remains visible as the static inventory entry.
-    return candidate
+async function liveWorktrees(candidate: RepositoryCandidate, worktreeRoot?: string): Promise<RepositoryCandidate> {
+  const source = await realpath(candidate.path)
+  const commonDir = await realpath(resolve(source, await git(source, ["rev-parse", "--git-common-dir"])))
+  if (hash(commonDir) !== candidate.repoId) throw new Error(`repoId does not match configured checkout ${source}`)
+  const output = await git(source, ["worktree", "list", "--porcelain"])
+  const found: Array<{ path?: string; branch?: string }> = []
+  let current: { path?: string; branch?: string } = {}
+  const finish = () => {
+    if (current.path) found.push(current)
+    current = {}
   }
+  for (const line of output.split("\n")) {
+    if (!line) finish()
+    else if (line.startsWith("worktree ")) current.path = line.slice("worktree ".length)
+    else if (line.startsWith("branch ")) current.branch = line.slice("branch ".length).replace(/^refs\/heads\//, "")
+  }
+  finish()
+  const mainPath = await realpath(candidate.worktrees.find((worktree) => worktree.kind === "main")?.path ?? candidate.path).catch(() => source)
+  const configuredRoots = [...new Set([...candidate.worktrees.map((worktree) => worktree.path), ...(worktreeRoot ? [worktreeRoot] : [])])]
+  const worktrees: Array<RepositoryCandidate["worktrees"][number]> = []
+  for (const item of found) {
+    if (!item.path || !item.branch) continue
+    const path = await realpath(item.path).catch(() => undefined)
+    // Git can list prunable paths. Skip that entry without losing valid worktrees from this repo.
+    if (!path || !(await withinRoots(path, configuredRoots))) continue
+    const dirty = (await git(path, ["status", "--porcelain"])).length > 0
+    worktrees.push({
+      worktreeId: hash(path),
+      branch: item.branch,
+      kind: path === mainPath ? "main" : "worktree",
+      dirty,
+      path,
+    })
+  }
+  if (!worktrees.length) throw new Error(`no accessible Git worktrees are configured for ${candidate.host}/${candidate.name}`)
+  return { ...candidate, path: mainPath, worktrees }
 }
 
 function localCandidates(map: RepoMapV1): RepositoryCandidate[] {
@@ -113,9 +109,20 @@ export function listLocalRepositories(map: RepoMapV1 | undefined, query?: string
 }
 
 /** Refresh known repositories from Git itself; this finds newly-created worktrees without scanning the filesystem. */
-export async function listLiveLocalRepositories(map: RepoMapV1 | undefined, query?: string) {
-  const candidates = await Promise.all((map ? localCandidates(map) : []).map(liveWorktrees))
-  return candidates.filter((candidate) => matches(candidate, query))
+export async function listLiveLocalRepositories(map: RepoMapV1 | undefined, query?: string, allowedRoots?: readonly string[]) {
+  const candidates = await Promise.all((map ? localCandidates(map) : []).map((candidate) => liveWorktrees(candidate, map?.worktreeRoot)))
+  const authorized: RepositoryCandidate[] = []
+  for (const candidate of candidates) {
+    if (!allowedRoots) {
+      authorized.push(candidate)
+      continue
+    }
+    if (!(await withinRoots(candidate.path, allowedRoots))) continue
+    const worktrees: Array<RepositoryCandidate["worktrees"][number]> = []
+    for (const worktree of candidate.worktrees) if (await withinRoots(worktree.path, allowedRoots)) worktrees.push(worktree)
+    if (worktrees.length) authorized.push({ ...candidate, worktrees })
+  }
+  return authorized.filter((candidate) => matches(candidate, query))
 }
 
 function matches(candidate: RepositoryCandidate, query: string | undefined) {
