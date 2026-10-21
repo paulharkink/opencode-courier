@@ -202,66 +202,11 @@ describe("spawn", () => {
   })
 
   describe("nested isolation", () => {
-    /** ses_parent is an isolated child of ses_root, working in /wt/parent. */
-    const isolatedParent = async (ports: CourierPorts) =>
-      childStore(ports.storage).record({ sessionID: "ses_parent", parentID: "ses_root", title: "P", directory: "/wt/parent", isolated: true, createdAt: 1, base: "root000" })
-
-    test("starts an isolated child's worktree from an isolated parent's HEAD, and records it as the base", async () => {
-      const { ports, calls: all, store } = fakePorts()
-      await isolatedParent(ports)
-      const heads: string[] = []
-      ;(ports as any).head = async (directory: string) => (heads.push(directory), directory === "/wt/parent" ? "par777" : "par777")
-
-      const child = await spawn(ports, "ses_parent", { task: "t", isolate: true })
-
-      expect(afterLookups(all)[0]).toEqual({ method: "worktree.create", input: { projectID: "proj_1", from: "/wt/parent", branch: "par777" } })
-      expect(heads).toEqual(["/wt/parent", "/repo/.worktrees/ses"])
-      expect(store.get(rosterKey("ses_parent", "ses_child"))).toMatchObject({ isolated: true, base: "par777" })
-      expect(child).toMatchObject({ fromParent: true })
-      expect(child).not.toHaveProperty("uncommitted")
-    })
-
-    test("a root's isolated child, and a parent that is not isolated, start from the project", async () => {
-      const root = fakePorts()
-      await spawn(root.ports, "ses_root", { task: "t", isolate: true })
-      expect(afterLookups(root.calls)[0]!.input).toEqual({ projectID: "proj_1" })
-
-      const plain = fakePorts()
-      await childStore(plain.ports.storage).record({ sessionID: "ses_parent", parentID: "ses_root", title: "P", directory: "/repo", isolated: false, createdAt: 1 })
-      const child = await spawn(plain.ports, "ses_parent", { task: "t", isolate: true })
-      expect(afterLookups(plain.calls)[0]!.input).toEqual({ projectID: "proj_1" })
-      expect(child).not.toHaveProperty("fromParent")
-    })
-
-    test("a child that is not isolated does not read the parent's HEAD", async () => {
+    test("a spawned worker cannot create any Courier child session", async () => {
       const { ports, calls } = fakePorts()
-      await isolatedParent(ports)
-      ;(ports as any).head = async () => {
-        throw new Error("not read")
-      }
-      await spawn(ports, "ses_parent", { task: "t" })
-      expect(afterLookups(calls).map((call) => call.method)).toEqual(["session.create", "session.prompt"])
-    })
-
-    test("fails the spawn, starting nothing, when the parent's HEAD cannot be read", async () => {
-      const { ports, calls } = fakePorts()
-      await isolatedParent(ports)
-      ;(ports as any).head = async () => undefined
-
-      await expect(spawn(ports, "ses_parent", { task: "t", isolate: true })).rejects.toThrow("HEAD of your worktree /wt/parent could not be read")
+      await childStore(ports.storage).record({ sessionID: "ses_parent", parentID: "ses_root", title: "P", directory: "/wt/parent", isolated: true, createdAt: 1 })
+      await expect(spawn(ports, "ses_parent", { task: "t", isolate: true })).rejects.toThrow("Courier workers cannot start child sessions")
       expect(afterLookups(calls)).toEqual([])
-    })
-
-    test("warns when the parent's worktree has uncommitted changes, and not when git cannot tell", async () => {
-      const dirty = fakePorts()
-      await isolatedParent(dirty.ports)
-      ;(dirty.ports as any).dirty = async () => true
-      expect(await spawn(dirty.ports, "ses_parent", { task: "t", isolate: true })).toMatchObject({ fromParent: true, uncommitted: true })
-
-      const unknown = fakePorts()
-      await isolatedParent(unknown.ports)
-      ;(unknown.ports as any).dirty = async () => undefined
-      expect(await spawn(unknown.ports, "ses_parent", { task: "t", isolate: true })).not.toHaveProperty("uncommitted")
     })
 
     test("briefs an isolated child with its branch, and a plain one without", async () => {

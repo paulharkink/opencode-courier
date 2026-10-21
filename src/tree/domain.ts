@@ -101,6 +101,15 @@ export interface RosterEntry {
   readonly nodeId?: string
   /** The named assignment shared by both rosters for a remote child. */
   readonly workName?: string
+  /** The named repo-map assignment held until courier_close confirms the worker stopped. */
+  readonly assignmentID?: string
+  readonly repoId?: string
+  readonly branch?: string
+  readonly worktreeId?: string
+  readonly rootSessionID?: string
+  readonly rootName?: string
+  /** True only for a worktree created by this assignment; selected existing/main checkouts are retained. */
+  readonly createdWorkspace?: boolean
   /** Created with OpenCode's own `parentID` (the `nativeChildren` option), so OpenCode shows its asks in its parent's view. */
   readonly native?: true
 }

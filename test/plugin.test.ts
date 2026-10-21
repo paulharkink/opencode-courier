@@ -3,7 +3,7 @@ import { Schema } from "effect"
 import plugin, { courier } from "../src/index.js"
 import { memberAt, OWNER_KEY, SERVER } from "../src/platform/hub.js"
 import { DEFAULT_LIMITS } from "../src/tree/domain.js"
-import { depthRefusal, rolePart } from "../src/tree/text.js"
+import { rolePart } from "../src/tree/text.js"
 import { SKILL_ID } from "../src/kernel/protocol.js"
 import { SKILL_CONTENT, SKILL_DESCRIPTION } from "../src/skill.js"
 import { builtVersions } from "../src/platform/version.js"
@@ -214,6 +214,9 @@ test("registers the courier tools", async () => {
   const { tools } = await setUp()
 
   expect([...tools.keys()]).toEqual([
+    "courier_session",
+    "courier_close",
+    "courier_repos",
     "courier_spawn",
     "courier_send",
     "courier_status",
@@ -247,7 +250,7 @@ test("loads all the same when the host cannot register the RPC, and logs it", as
   try {
     const { tools, hooks } = await setUp({}, undefined, [], pinned, Promise.resolve(), { rpc: undefined })
 
-    expect(tools.size).toBe(14)
+    expect(tools.size).toBe(17)
     expect(hooks.has("context")).toBe(true)
     expect(logged.filter((line) => line.startsWith("courier rpc: not registered"))).toHaveLength(1)
   } finally {
@@ -279,9 +282,9 @@ test("its context hook, with the limits from the options, hides courier_spawn, c
   await hooks.get("context")!(event)
 
   expect(Object.keys(event.tools)).toEqual(["courier_send"])
-  expect(event.system).toEqual([{ type: "text", text: rolePart(1, { ...DEFAULT_LIMITS, maxDepth: 1 }) }])
+  expect(event.system).toEqual([{ type: "text", text: rolePart(1, { ...DEFAULT_LIMITS, maxDepth: 1 }, true) }])
   await expect(tools.get("courier_spawn").execute({ task: "t" }, { sessionID: "ses_child" })).rejects.toThrow(
-    `courier_spawn failed: ${depthRefusal(1, 1)}`,
+    "courier_spawn failed: Courier workers cannot start child sessions; ask the Head Unit to dispatch the work",
   )
 })
 

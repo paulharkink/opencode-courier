@@ -9,6 +9,10 @@ import { status } from "./status.js"
 import { cleanup } from "./cleanup.js"
 import { send } from "./send.js"
 import { forgetWakes } from "./wake.js"
+import { listLocalRepositories } from "./repos.js"
+import { busy } from "./domain.js"
+import { acquireWorkspace } from "./workspace.js"
+import { releaseWorkspace } from "./workspace.js"
 
 const MAX_TASK = 40_000
 const WORK_NAME = /^[^\r\n]{1,120}$/
@@ -16,8 +20,17 @@ const WORK_NAME = /^[^\r\n]{1,120}$/
 export async function handleRemote(ports: CourierPorts, cleanupPorts: CleanupPorts, request: RemoteEnvelope) {
   const input = obj(request.payload)
   switch (request.operation) {
+    case "repositories": {
+      const query = input.query === undefined ? undefined : requiredString(input.query, "query")
+      if (query && query.length > 200) throw new Error("query is too long")
+      return { repositories: listLocalRepositories(ports.repoMap, query), ...(ports.repoMap?.worktreeRoot ? { worktreeRoot: ports.repoMap.worktreeRoot } : {}) }
+    }
     case "prepare":
       return prepare(ports, request.sender, input)
+    case "prepareRepo":
+      return prepareRepo(ports, request.sender, input)
+    case "abortPreparedRepo":
+      return abortPreparedRepo(ports, request.sender, input)
     case "start":
       return start(ports, request.sender, input)
     case "send":
@@ -27,9 +40,23 @@ export async function handleRemote(ports: CourierPorts, cleanupPorts: CleanupPor
       return status(ports, { sessionID: requiredString(input.sessionID, "sessionID") })
     case "interrupt": {
       const sessionID = requiredString(input.sessionID, "sessionID")
-      await childOwnedBy(ports, request.sender, sessionID)
+      const entry = await childOwnedBy(ports, request.sender, sessionID)
+      if (input.resume === false) {
+        const parentID = requiredString(input.parentID, "parentID")
+        if (entry.parentID !== `${request.sender}/${parentID}` && entry.parentID !== parentID)
+          throw new Error("close parent does not own this session")
+      }
       await forgetWakes(ports, sessionID).catch((error: unknown) => ports.log(`courier_stop: could not drop the wake watch of ${sessionID}: ${String(error)}`))
-      return ports.session.interrupt({ sessionID })
+      const result = await ports.session.interrupt({ sessionID, ...(input.resume === false ? { resume: false } : {}) })
+      if (input.resume === false) {
+        await ports.session.wait({ sessionID })
+        const latest = await ports.session.get({ sessionID })
+        if (busy(latest.time))
+          throw new Error("OpenCode did not confirm the session stopped; assignment remains owned")
+        if (entry.assignmentID) await releaseWorkspace(ports.gate, entry.assignmentID, true)
+        return { stopped: true as const, interrupted: result.interrupted }
+      }
+      return result
     }
     case "cleanup": {
       const sessionID = requiredString(input.sessionID, "sessionID")
@@ -43,6 +70,120 @@ export async function handleRemote(ports: CourierPorts, cleanupPorts: CleanupPor
     default:
       throw new Error(`unsupported Courier operation ${request.operation}`)
   }
+}
+
+async function abortPreparedRepo(ports: CourierPorts, sender: string, input: Record<string, any>) {
+  const sessionID = requiredString(input.sessionID, "sessionID")
+  const session = await ports.session.get({ sessionID })
+  const courier = obj(obj(session.metadata).courier)
+  if (courier.remotePreparedBy !== sender || courier.remotePreparedRepo !== true)
+    throw new Error("prepared repository worker does not belong to this peer")
+  const rootSessionID = requiredString(courier.remoteRootSessionID, "rootSessionID")
+  if (rootSessionID !== `${sender}/${requiredString(input.parentID, "parentID")}`)
+    throw new Error("prepared repository worker does not belong to this Head Unit")
+  await ports.session.interrupt({ sessionID, resume: false })
+  await ports.session.wait({ sessionID })
+  const latest = await ports.session.get({ sessionID })
+  if (busy(latest.time)) throw new Error("prepared worker did not stop; assignment remains owned")
+  if (typeof courier.assignmentID === "string") await releaseWorkspace(ports.gate, courier.assignmentID, true)
+  return { stopped: true as const, retainedWorkspace: true as const }
+}
+
+async function prepareRepo(ports: CourierPorts, sender: string, input: Record<string, any>) {
+  if (!ports.repoMap) throw new Error("repoMapFile is required on this node")
+  const peer = ports.remote?.peers[sender]
+  if (!peer) throw new Error("requesting node is not configured")
+  const repo = obj(input.repo)
+  const host = requiredString(repo.host, "repo.host")
+  const name = requiredString(repo.name, "repo.name")
+  const repoId = requiredString(repo.repoId, "repo.repoId")
+  const candidate = listLocalRepositories(ports.repoMap).find((item) => item.host === host && item.name === name && item.repoId === repoId)
+  if (!candidate) throw new Error("repository is not in this node's local inventory")
+  if (!(await withinRoots(candidate.path, peer.allowedRoots))) throw new Error("repository is outside this peer's allowed roots")
+  const workName = requiredString(input.workName, "workName").trim()
+  if (!WORK_NAME.test(workName)) throw new Error("workName must be 1 to 120 characters on one line")
+  const task = requiredString(input.task, "task")
+  if (task.length > MAX_TASK) throw new Error(`task is over ${MAX_TASK} characters`)
+  const title = optionalString(input.title, "title") ?? (task.trim().split("\n")[0] ?? "").slice(0, 60)
+  if (title.length > 200) throw new Error("title is too long")
+  const branch = parseBranchIntent(input.branch)
+  const checkout = parseCheckoutIntent(input.checkout)
+  const agent = optionalString(input.agent, "agent")
+  const root = obj(input.root)
+  const rootSessionID = requiredString(root.sessionID, "root.sessionID")
+  const rootProjectID = requiredString(root.projectID, "root.projectID")
+  const rootName = requiredString(root.name, "root.name")
+  let model = validModel(input.parentModel)
+  if (agent) {
+    const selected = await ports.agent.get({ agentID: agent, location: { directory: candidate.path } })
+    if (selected.data.model) model = undefined
+  }
+  const assignmentID = `assignment_${crypto.randomUUID()}`
+  let assignment: Awaited<ReturnType<typeof acquireWorkspace>> | undefined
+  try {
+    assignment = await acquireWorkspace(
+      { gate: ports.gate, nodeId: ports.repoMap.nodeId, worktreeRoot: ports.repoMap.worktreeRoot },
+      { assignmentID, rootSessionID: `${sender}/${rootSessionID}`, ownerSessionID: assignmentID, repository: candidate, branch, checkout },
+    )
+    const child = await ports.session.create({
+      title,
+      ...(agent ? { agent } : {}),
+      ...(model ? { model } : {}),
+      location: { directory: assignment.directory },
+      metadata: {
+        courier: {
+          remotePreparedBy: sender,
+          remotePreparedRepo: true,
+          managed: true,
+          ...(ports.generationID ? { generationID: ports.generationID } : {}),
+          workName,
+          remoteSourceDirectory: assignment.sourceDirectory,
+          remoteIsolated: assignment.worktreeId !== undefined,
+          remoteRootSessionID: `${sender}/${rootSessionID}`,
+          remoteRootProjectID: rootProjectID,
+          remoteRootName: rootName,
+          assignmentID,
+          ownerNodeId: ports.repoMap.nodeId,
+          repoId,
+          branch: assignment.branch,
+          baseCommit: assignment.baseCommit,
+          dirty: assignment.dirty,
+          ...(assignment.worktreeId ? { worktreeId: assignment.worktreeId } : {}),
+          directory: assignment.directory,
+        },
+      },
+    })
+    ports.gate.assignments!.set(assignmentID, { ...assignment, sessionID: child.id })
+    return {
+      sessionID: child.id,
+      directory: assignment.directory,
+      sourceDirectory: assignment.sourceDirectory,
+      title,
+      assignmentID,
+      branch: assignment.branch,
+      baseCommit: assignment.baseCommit,
+      dirty: assignment.dirty,
+      ...(assignment.worktreeId ? { worktreeId: assignment.worktreeId } : {}),
+    }
+  } catch (error) {
+    if (assignment) await releaseWorkspace(ports.gate, assignment.assignmentID, true).catch(() => undefined)
+    throw error
+  }
+}
+
+function parseBranchIntent(value: unknown): { mode: "existing"; name: string } | { mode: "create"; name: string; base: string } {
+  const input = obj(value)
+  if (input.mode === "existing") return { mode: "existing", name: requiredString(input.name, "branch.name") }
+  if (input.mode === "create") return { mode: "create", name: requiredString(input.name, "branch.name"), base: requiredString(input.base, "branch.base") }
+  throw new Error("branch intent is required")
+}
+
+function parseCheckoutIntent(value: unknown): { mode: "main" } | { mode: "existing-worktree"; worktreeId: string } | { mode: "create-worktree"; directory: string } {
+  const input = obj(value)
+  if (input.mode === "main") return { mode: "main" }
+  if (input.mode === "existing-worktree") return { mode: "existing-worktree", worktreeId: requiredString(input.worktreeId, "checkout.worktreeId") }
+  if (input.mode === "create-worktree") return { mode: "create-worktree", directory: requiredString(input.directory, "checkout.directory") }
+  throw new Error("checkout intent is required")
 }
 
 async function prepare(ports: CourierPorts, sender: string, input: Record<string, any>): Promise<PreparedRemote> {
@@ -112,6 +253,7 @@ async function start(ports: CourierPorts, sender: string, input: Record<string, 
     throw new Error("prepared session does not match the requesting node and workName")
   if (typeof courier.remoteSourceDirectory !== "string" || typeof courier.remoteIsolated !== "boolean")
     throw new Error("prepared session is missing its remote directory metadata")
+  const managed = courier.remotePreparedRepo === true
   const entry: RosterEntry = {
     sessionID,
     parentID,
@@ -121,6 +263,16 @@ async function start(ports: CourierPorts, sender: string, input: Record<string, 
     createdAt: ports.now(),
     reports: "status",
     workName,
+    ...(managed ? {
+      assignmentID: requiredString(courier.assignmentID, "assignmentID"),
+      repoId: requiredString(courier.repoId, "repoId"),
+      branch: requiredString(courier.branch, "branch"),
+      rootSessionID: requiredString(courier.remoteRootSessionID, "rootSessionID"),
+      rootName: requiredString(courier.remoteRootName, "rootName"),
+      createdWorkspace: typeof courier.worktreeId === "string",
+      ...(typeof courier.worktreeId === "string" ? { worktreeId: courier.worktreeId } : {}),
+      base: requiredString(courier.baseCommit, "baseCommit"),
+    } : {}),
     ...(courier.remoteIsolated ? { source: courier.remoteSourceDirectory, project: optionalString(courier.remoteProject, "remoteProject") } : {}),
     ...(typeof courier.remoteBase === "string" ? { base: courier.remoteBase } : {}),
   }
@@ -129,7 +281,7 @@ async function start(ports: CourierPorts, sender: string, input: Record<string, 
   try {
     await ports.session.prompt({
       sessionID,
-      text: childBrief(parentID, task, depth, ports.limits, entry.isolated ? childBranch(sessionID) : undefined, workName),
+      text: childBrief(parentID, task, depth, ports.limits, managed ? entry.branch : entry.isolated ? childBranch(sessionID) : undefined, workName, managed),
     })
   } catch (error) {
     await childStore(ports.storage).settled(sessionID, "failed", ports.now()).catch(() => undefined)

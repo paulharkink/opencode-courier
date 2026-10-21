@@ -6,6 +6,7 @@ import type { Plugin } from "@opencode/plugin"
 import type { Status } from "../kernel/protocol.js"
 import type { Storage } from "../platform/storage.js"
 import type { RemoteConfig } from "../platform/remote.js"
+import type { RepoMapV1 } from "./repo-map.js"
 import type { Limits, Member, RosterEntry } from "./domain.js"
 
 export type { Artifacts, HeldReport, LeftMember, Limits, Member, RosterEntry, Standing } from "./domain.js"
@@ -163,7 +164,7 @@ export interface Sent {
 
 /** The slice of the plugin context the courier tools use; tests pass a fake. */
 export interface CourierPorts {
-  readonly session: Pick<Context["session"], "create" | "prompt" | "synthetic" | "get" | "context" | "interrupt">
+  readonly session: Pick<Context["session"], "create" | "prompt" | "synthetic" | "get" | "context" | "interrupt" | "remove" | "wait">
   readonly agent: Pick<Context["agent"], "get">
   readonly worktree: Pick<Context["worktree"], "create" | "remove">
   /** The project of the plugin's location; an isolated child's worktree is made in it, and removed from it. */
@@ -174,6 +175,8 @@ export interface CourierPorts {
   readonly dirty: (directory: string) => Promise<boolean | undefined>
   readonly storage: RosterStorage
   readonly directory: string
+  /** Process-wide random token; managed workers from an earlier OpenCode process are interrupted before resuming. */
+  readonly generationID?: string
   readonly now: () => number
   /** The permission requests and questions a session waits on, wherever they are pending. */
   readonly pending: (sessionID: string) => Promise<ReadonlyArray<Pending>>
@@ -185,6 +188,8 @@ export interface CourierPorts {
   /** The `nativeChildren` option: a child started without isolate is created with OpenCode's own `parentID`. */
   readonly nativeChildren?: boolean
   readonly remote?: RemoteConfig
+  /** Machine-local AACT inventory and peer descriptors, loaded from `repoMapFile` when configured. */
+  readonly repoMap?: RepoMapV1
   readonly gate: SpawnGate
   /** The depths the `context` hook remembers; a parent's is dropped when it starts a child. */
   readonly roles: Map<string, number | null>
@@ -244,7 +249,23 @@ export interface Reservation {
  */
 export interface SpawnGate {
   readonly reserved: Set<Reservation>
+  /** Active repo-map workspaces shared by all Courier locations in this process. */
+  readonly assignments?: Map<string, ActiveAssignment>
   turn: Promise<unknown>
+}
+
+export interface ActiveAssignment {
+  readonly assignmentID: string
+  readonly reservationKey: string
+  readonly rootSessionID: string
+  readonly sessionID: string
+  readonly nodeId: string
+  readonly repoId: string
+  readonly branch: string
+  readonly directory: string
+  readonly sourceDirectory: string
+  readonly dirty: boolean
+  closed?: boolean
 }
 
 export interface LimitPorts {
@@ -349,5 +370,7 @@ export interface ContextPorts {
   readonly roles: Map<string, number | null>
   /** Tools of other modules hidden from a leaf alongside courier_spawn; `src/index.ts` names courier_recall and courier_note. */
   readonly hiddenFromLeaf?: ReadonlyArray<string>
+  readonly generationID?: string
+  readonly session?: Pick<Context["session"], "get" | "interrupt">
   readonly log: (message: string) => void
 }

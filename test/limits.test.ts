@@ -370,21 +370,18 @@ describe("spawn", () => {
     const { courier, calls, child, gate } = spawnPorts({ ...DEFAULT_LIMITS, maxDepth: 1 })
     await child("ses_root", "ses_a")
 
-    await expect(spawn(courier, "ses_a", { task: "t" })).rejects.toThrow(depthRefusal(1, 1))
+    await expect(spawn(courier, "ses_a", { task: "t" })).rejects.toThrow("Courier workers cannot start child sessions")
 
     expect(calls).toEqual([])
     expect(gate.reserved.size).toBe(0)
   })
 
   test("briefs the child with its depth and the limits, frees its place, and forgets the parent's role", async () => {
-    const { courier, calls, gate, roles, child } = spawnPorts()
-    await child("ses_root", "ses_a")
-
-    await spawn(courier, "ses_a", { task: "t" })
-
-    expect(calls).toEqual(["session.create", childBrief("ses_a", "t", 2, DEFAULT_LIMITS)])
-    expect(gate.reserved.size).toBe(0)
+    const { courier, calls, gate, roles } = spawnPorts()
     await spawn(courier, "ses_root", { task: "t" })
+
+    expect(calls).toEqual(["session.create", childBrief("ses_root", "t", 1, DEFAULT_LIMITS)])
+    expect(gate.reserved.size).toBe(0)
     expect(roles.has("ses_root")).toBe(false)
   })
 
@@ -451,21 +448,39 @@ describe("the context hook", () => {
     expect(event).toEqual({ sessionID: "ses_alone", tools: { courier_send: {}, read: {} }, system: [{ type: "text", text: "base" }] })
   })
 
-  test("names the role per depth: root orchestrator, sub-orchestrator, leaf", async () => {
+  test("interrupts a managed worker from an earlier process before adding model context", async () => {
+    const { ports: basePorts } = contextPorts()
+    const interrupted: unknown[] = []
+    const ports: ContextPorts = {
+      ...basePorts,
+      generationID: "current-process",
+      session: {
+      get: async () => ({ metadata: { courier: { managed: true, generationID: "old-process" } } }) as any,
+      interrupt: async (input: unknown) => { interrupted.push(input); return { interrupted: true } },
+      } as any,
+    }
+    const event = { sessionID: "ses_stale", tools: tools() as Record<string, unknown>, system: [{ type: "text" as const, text: "base" }] }
+
+    await expect(shapeContext(ports, event)).rejects.toThrow("stale managed worker ses_stale was interrupted before its task could resume")
+    expect(interrupted).toEqual([{ sessionID: "ses_stale", resume: false }])
+    expect(event.system).toEqual([{ type: "text", text: "base" }])
+  })
+
+  test("names roots as orchestrators and spawned sessions as managed workers", async () => {
     const { shape, child } = contextPorts()
     await chainTo(child, 3)
 
     for (const [sessionID, depth] of [["ses_root", 0], ["ses_d1", 1], ["ses_d2", 2], ["ses_d3", 3]] as const) {
       const event = await shape(sessionID)
-      expect(event.system).toEqual([{ type: "text", text: "base" }, { type: "text", text: rolePart(depth, DEFAULT_LIMITS) }])
+      expect(event.system).toEqual([{ type: "text", text: "base" }, { type: "text", text: rolePart(depth, DEFAULT_LIMITS, depth > 0) }])
     }
   })
 
-  test("hides courier_spawn at maxDepth and keeps it above", async () => {
+  test("hides courier_spawn from every worker, regardless of tree depth", async () => {
     const { shape, child } = contextPorts({ ...DEFAULT_LIMITS, maxDepth: 2 })
     await chainTo(child, 2)
 
-    expect(Object.keys((await shape("ses_d1")).tools)).toEqual(["courier_spawn", "courier_send", "read"])
+    expect(Object.keys((await shape("ses_d1")).tools)).toEqual(["courier_send", "read"])
     expect(Object.keys((await shape("ses_d2")).tools)).toEqual(["courier_send", "read"])
     expect(Object.keys((await shape("ses_root")).tools)).toEqual(["courier_spawn", "courier_send", "read"])
   })
@@ -477,6 +492,10 @@ describe("the context hook", () => {
     expect((await shape("ses_root")).system.at(-1)).toEqual(pointer)
     await child("ses_root", "ses_a")
     expect((await shape("ses_root")).system.at(-1)).toEqual(pointer)
+
+    ports.roles.delete("ses_root")
+    const refreshed = await shape("ses_root")
+    expect(refreshed.system.at(-1)).toEqual({ type: "text", text: rolePart(0, DEFAULT_LIMITS) })
 
     ports.roles.delete("ses_root")
     expect((await shape("ses_root")).system).toEqual([{ type: "text", text: "base" }, root])
@@ -510,7 +529,7 @@ describe("the context hook", () => {
       input.prefix === "roster/" ? Promise.reject(new Error("whole roster scanned")) : scan(input)
 
     for (const [sessionID, depth] of [["ses_root", 0], ["ses_d1", 1], ["ses_d2", 2], ["ses_d3", 3]] as const)
-      expect((await shape(sessionID)).system.at(-1)).toEqual({ type: "text", text: rolePart(depth, DEFAULT_LIMITS) })
+      expect((await shape(sessionID)).system.at(-1)).toEqual({ type: "text", text: rolePart(depth, DEFAULT_LIMITS, depth > 0) })
   })
 
   test("adds no second role part or pointer, as a second copy of the plugin would", async () => {

@@ -3,6 +3,24 @@
 exports[`tools are the fourteen courier tools, each a direct tool 1`] = `
 [
   [
+    "courier_session",
+    {
+      "codemode": false,
+    },
+  ],
+  [
+    "courier_close",
+    {
+      "codemode": false,
+    },
+  ],
+  [
+    "courier_repos",
+    {
+      "codemode": false,
+    },
+  ],
+  [
     "courier_spawn",
     {
       "codemode": false,
@@ -89,9 +107,81 @@ exports[`tools are the fourteen courier tools, each a direct tool 1`] = `
 ]
 `;
 
+exports[`tools courier_session 1`] = `
+{
+  "description": "Register this user-facing session as the named Courier Head Unit before it starts managed workers. The root name is shared across its tree and every child name is ROOT/LABEL. A managed worker cannot register itself as a root.",
+  "input": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "description": "Required meaningful name for this user-facing Head Unit session. Children are named ROOT/LABEL.",
+        "type": "string",
+      },
+    },
+    "required": [
+      "name",
+    ],
+    "type": "object",
+  },
+}
+`;
+
+exports[`tools courier_close 1`] = `
+{
+  "description": "Interrupt a Courier worker with resume disabled, wait for OpenCode to confirm it is idle, and release only its session assignment. Closing this named Head Unit attempts every child and unregisters the root only when every child stopped. Branches, worktrees and session history are retained for manual cleanup.",
+  "input": {
+    "additionalProperties": false,
+    "properties": {
+      "sessionID": {
+        "description": "A worker session you own, or this named root session to stop its children and close the root.",
+        "type": "string",
+      },
+    },
+    "required": [
+      "sessionID",
+    ],
+    "type": "object",
+  },
+}
+`;
+
+exports[`tools courier_repos 1`] = `
+{
+  "description": "List repositories advertised by this node and its configured peers. Use the exact host and repository name, the node ID and repoId where clones are ambiguous, and an advertised worktreeId or worktreeRoot when choosing a checkout. Unavailable peers are returned as errors; no other node is substituted.",
+  "input": {
+    "additionalProperties": false,
+    "properties": {
+      "peer": {
+        "anyOf": [
+          {
+            "description": "Configured peer node to query. Without it, query local inventory and every configured peer.",
+            "type": "string",
+          },
+          {
+            "type": "null",
+          },
+        ],
+      },
+      "query": {
+        "anyOf": [
+          {
+            "description": "Optional case-insensitive search across repository host, name, path and branch.",
+            "type": "string",
+          },
+          {
+            "type": "null",
+          },
+        ],
+      },
+    },
+    "type": "object",
+  },
+}
+`;
+
 exports[`tools courier_spawn 1`] = `
 {
-  "description": "Start a new OpenCode session on a task and return immediately. It runs on your model. The session reports back with courier_send, which wakes this session, and you are told if its turn fails or ends without a report instead, it waits for a permission or it asks a question. Give a batch of parallel sessions one group name to be woken once, with all their reports, instead of once per report. DO NOT poll it or call courier_status in a loop: once you have started the sessions you need, end your turn by replying without calling more tools; each report, or each group's reports, starts a new turn in which you carry on. For a remote session, give its configured peer, an absolute source directory on that node and a short workName; with isolate: true, the result identifies the actual worktree separately. Its stable ID is nodeId/sessionID and it reports to you across nodes. For long tasks, also courier_later a check-in for yourself in case it never reports, and courier_cancel it when it does.",
+  "description": "Start a new OpenCode session on a task and return immediately. It runs on your model. The session reports back with courier_send, which wakes this session, and you are told if its turn fails or ends without a report instead, it waits for a permission or it asks a question. Give a batch of parallel sessions one group name to be woken once, with all their reports, instead of once per report. DO NOT poll it or call courier_status in a loop: once you have started the sessions you need, end your turn by replying without calling more tools; each report, or each group's reports, starts a new turn in which you carry on. For a repo-map assignment, register this session with courier_session first, then choose an advertised repository and supply explicit branch and checkout intents. Creating a branch requires its exact name and base; creating a worktree requires an exact destination under the advertised worktreeRoot. Workers must ask this Head Unit to dispatch sibling work. Legacy bare-directory spawns remain available for un-managed sessions. For a remote legacy session, give its configured peer, absolute source directory and workName. Its stable ID is nodeId/sessionID. For long tasks, also courier_later a check-in for yourself in case it never reports, and courier_cancel it when it does.",
   "input": {
     "additionalProperties": false,
     "properties": {
@@ -100,6 +190,125 @@ exports[`tools courier_spawn 1`] = `
           {
             "description": "Agent to run the session with; defaults to the default agent.",
             "type": "string",
+          },
+          {
+            "type": "null",
+          },
+        ],
+      },
+      "branch": {
+        "anyOf": [
+          {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "existing",
+                    ],
+                    "type": "string",
+                  },
+                  "name": {
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "mode",
+                  "name",
+                ],
+                "type": "object",
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "base": {
+                    "type": "string",
+                  },
+                  "mode": {
+                    "enum": [
+                      "create",
+                    ],
+                    "type": "string",
+                  },
+                  "name": {
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "mode",
+                  "name",
+                  "base",
+                ],
+                "type": "object",
+              },
+            ],
+            "description": "Explicit existing branch, or exact new branch name and explicit base commit/ref.",
+          },
+          {
+            "type": "null",
+          },
+        ],
+      },
+      "checkout": {
+        "anyOf": [
+          {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "main",
+                    ],
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "mode",
+                ],
+                "type": "object",
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "existing-worktree",
+                    ],
+                    "type": "string",
+                  },
+                  "worktreeId": {
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "mode",
+                  "worktreeId",
+                ],
+                "type": "object",
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "directory": {
+                    "type": "string",
+                  },
+                  "mode": {
+                    "enum": [
+                      "create-worktree",
+                    ],
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "mode",
+                  "directory",
+                ],
+                "type": "object",
+              },
+            ],
+            "description": "Explicit checkout choice. Creating a worktree requires an exact absolute destination inside the node's advertised worktreeRoot.",
           },
           {
             "type": "null",
@@ -144,6 +353,42 @@ exports[`tools courier_spawn 1`] = `
           {
             "description": "Configured remote node to run the session on.",
             "type": "string",
+          },
+          {
+            "type": "null",
+          },
+        ],
+      },
+      "repo": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "host": {
+                "description": "Exact advertised repository host.",
+                "type": "string",
+              },
+              "name": {
+                "description": "Exact advertised repository name.",
+                "type": "string",
+              },
+              "repoId": {
+                "anyOf": [
+                  {
+                    "description": "Opaque repoId required when multiple clones remain ambiguous.",
+                    "type": "string",
+                  },
+                  {
+                    "type": "null",
+                  },
+                ],
+              },
+            },
+            "required": [
+              "host",
+              "name",
+            ],
+            "type": "object",
           },
           {
             "type": "null",
