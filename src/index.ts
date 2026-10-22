@@ -5,6 +5,8 @@ import { Effect } from "effect"
 import { randomUUID } from "node:crypto"
 import { watchFromHub } from "./platform/events.js"
 import { hub, openInProcess, permissions as domains, sharedState, type Member, type TickJob } from "./platform/hub.js"
+import { readRemoteConfig } from "./platform/remote.js"
+import { obj, str } from "./platform/json.js"
 import { builtVersions, versionNotice } from "./platform/version.js"
 import { addSchedulingTools, cancelScheduled, dueJob, isScheduled, type LaterPorts } from "./scheduling/index.js"
 import {
@@ -34,6 +36,7 @@ import {
   wakeMissed,
   dirtyOf,
   headOf,
+  handleRemote,
   inspectWorktree,
   pruneExpired,
   readLimits,
@@ -49,6 +52,8 @@ import {
   type WatchPorts,
   type WatchState,
 } from "./tree/index.js"
+import { readRepoMap, type RepoMapV1 } from "./tree/repo-map.js"
+import { createIdentityManager } from "./tree/session.js"
 import {
   addWebhookTools,
   joinReceiver,
@@ -60,7 +65,9 @@ import {
 } from "./webhook/index.js"
 
 /** The spawns under way in the process, outside the hub, so spawns in other locations, copies and hub versions count them. */
-const gate = sharedState<SpawnGate>("spawning", () => ({ reserved: new Set(), turn: Promise.resolve() }))
+const gate = sharedState<SpawnGate>("spawning", () => ({ reserved: new Set(), assignments: new Map(), turn: Promise.resolve() }))
+/** Process-wide marker shared by all Courier copies; a new OpenCode process gets a fresh generation. */
+const generationID = sharedState("managed-worker-generation-v1", () => randomUUID())
 
 /** The type of each item enqueued for a spawned session, outside the hub like the gate. */
 const inbox = sharedState("inbox", () => new Map<string, string>())
@@ -128,12 +135,39 @@ export const courier = () => Plugin.define({
     }
     const { limits, problems } = readLimits(ctx.options)
     const { nativeChildren, problems: nativeProblems } = readNativeChildren(ctx.options)
+    let repoMap: RepoMapV1 | undefined
+    const repoMapFile = str(obj(ctx.options).repoMapFile)
+    if (repoMapFile) {
+      try {
+        repoMap = readRepoMap(repoMapFile)
+      } catch (error) {
+        log(`courier repo map: not loaded: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    let remote: ReturnType<typeof readRemoteConfig>
+    try {
+      remote = readRemoteConfig(ctx.options)
+      if (!remote && repoMap) {
+        remote = readRemoteConfig({
+          remoteNodes: {
+            nodeId: repoMap.nodeId,
+            peers: Object.fromEntries(repoMap.peers.map(({ peerId, ...peer }) => [peerId, peer])),
+          },
+        })
+      }
+      if (remote && repoMap && remote.nodeId !== repoMap.nodeId)
+        throw new Error("remoteNodes.nodeId must match repoMapFile.nodeId")
+    } catch (error) {
+      log(`courier remote nodes: not configured: ${error instanceof Error ? error.message : String(error)}`)
+    }
     const { memory, problems: memoryProblems } = readMemory(ctx.options)
     for (const problem of [...problems, ...nativeProblems, ...memoryProblems]) log(`courier: ${problem}`)
     const roles = new Map<string, number | null>()
     const ports: CourierPorts = {
       limits,
       nativeChildren,
+      ...(remote ? { remote } : {}),
+      ...(repoMap ? { repoMap } : {}),
       gate,
       roles,
       nudge,
@@ -143,6 +177,7 @@ export const courier = () => Plugin.define({
       worktree: ctx.worktree,
       storage: ctx.storage,
       directory: ctx.location.directory,
+      generationID,
       projectID: ctx.location.project.id,
       now: Date.now,
       windows: async () => (await ctx.model.list()).data.map((model) => ({ providerID: model.providerID, id: model.id, context: model.limit.context })),
@@ -166,7 +201,13 @@ export const courier = () => Plugin.define({
       newID: () => `later_${randomUUID()}`,
       log,
     }
-    const hooks: WebhookPorts = { storage: ctx.storage, session: ctx.session, now: Date.now, log: later.log }
+    const hooks: WebhookPorts = {
+      storage: ctx.storage,
+      session: ctx.session,
+      now: Date.now,
+      log: later.log,
+      ...(remote ? { remote: { config: remote, handle: (request) => handleRemote(ports, cleanupPorts, request, (sessionID) => cancelScheduled(later, sessionID)) } } : {}),
+    }
     let webhook: WebhookConfig | undefined
     try {
       webhook = readConfig(ctx.options)
@@ -178,7 +219,7 @@ export const courier = () => Plugin.define({
     const memoryPorts: MemoryPorts = { storage: ctx.storage, session: ctx.session, now: Date.now, log, projectID: ctx.location.project.id, memory, maxDepth: limits.maxDepth }
     // The tools in a fixed order: the tree's, then the person's, the scheduled messages', the webhooks' and the memory's.
     await ctx.tool.transform((tools) => {
-      addTreeTools(tools, { courier: ports, cleanup: cleanupPorts, stop: stopPorts })
+      addTreeTools(tools, { courier: ports, cleanup: cleanupPorts, stop: stopPorts, identity: createIdentityManager(ctx.storage) })
       addPersonTools(tools, { answer: answerPorts, questions: questionPorts, waiting: watched.waiting })
       addSchedulingTools(tools, later)
       addWebhookTools(tools, { hooks, receiving })
@@ -191,7 +232,7 @@ export const courier = () => Plugin.define({
       .then(() => registerPersonRpc(ctx.rpc, { questions: questionPorts, permissions }))
       .then(() => registerMemoryRpc(ctx.rpc, memoryPorts))
       .catch((error: unknown) => log(`courier rpc: not registered, the TUI part shows nothing and cannot stop: ${String(error)}`))
-    await ctx.session.hook("context", (event) => shapeContext({ storage: ctx.storage, limits, roles, hiddenFromLeaf: [RECALL_TOOL, NOTE_TOOL], log }, event))
+    await ctx.session.hook("context", (event) => shapeContext({ storage: ctx.storage, limits, roles, generationID, session: ctx.session, hiddenFromLeaf: [RECALL_TOOL, NOTE_TOOL], log }, event))
 
     const pruned = pruneExpired(ctx.storage, Date.now()).catch((error: unknown) => log(`courier roster prune: ${String(error)}`))
     const swept = sweepRecords(ctx.storage, Date.now()).catch((error: unknown) => log(`courier memory sweep: ${String(error)}`))

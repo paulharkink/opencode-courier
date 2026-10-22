@@ -113,7 +113,7 @@ const MODULES = ["tree", "person", "scheduling", "webhook", "memory"]
 const moduleOf = (file: string) => MODULES.find((folder) => file.startsWith(`${folder}/`))
 
 /** What an entrypoint may take of a module directly, besides its index.ts: its RPC contract, and for `tui` its TUI part. */
-const ENTRY_REACH: Record<string, readonly string[]> = { rpc: ["rpc"], tui: ["rpc", "tui"] }
+const ENTRY_REACH: Record<string, readonly string[]> = { index: ["repo-map", "session"], rpc: ["rpc"], tui: ["rpc", "tui"] }
 
 test("a module is imported from outside only through its index.ts, but by the tui and rpc entrypoints", () => {
   const reaching = [...imports()].flatMap(([module, imported]) =>

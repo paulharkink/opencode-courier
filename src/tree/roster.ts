@@ -84,7 +84,7 @@ export type Exists = (directory: string) => boolean
  * child whose worktree exists, which is kept so it can still be cleaned up.
  */
 export const isExpired = (entry: RosterEntry, now: number, exists: Exists = existsSync) =>
-  now - entry.createdAt > RETENTION_MS && !(entry.isolated && exists(entry.directory))
+  now - entry.createdAt > RETENTION_MS && !(entry.isolated && (entry.nodeId !== undefined || exists(entry.directory)))
 
 /** Forgets the given entries that are expired at `now`, and returns the rest. */
 async function dropExpired(storage: RosterStorage, entries: RosterEntry[], now: number, exists: Exists) {

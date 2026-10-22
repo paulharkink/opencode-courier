@@ -3,6 +3,7 @@ import { groupStanding, holdReport, membershipFor, unholdForBlocked } from "./gr
 import type { Artifacts, CourierPorts, Held, HeldReport, Membership, RosterEntry, Sent } from "./ports.js"
 import { childStore, groupStore } from "./store.js"
 import { reportBody } from "./text.js"
+import { remoteRequest, remoteTarget } from "../platform/remote.js"
 
 export interface SendInput {
   readonly sessionID: string
@@ -25,6 +26,18 @@ export async function send(ports: CourierPorts, from: string, input: SendInput):
   try {
     const held = noted?.member && status && status !== "blocked" ? await hold(ports, noted.member, { at: noted.at, status, message: input.message, ...(input.artifacts ? { artifacts: input.artifacts } : {}) }) : undefined
     if (held) return { status, report: true, held }
+    const remote = remoteTarget(ports, input.sessionID)
+    if (remote) {
+      const delivered = await remoteRequest<Sent>(ports, remote.nodeId, "send", {
+        from: ports.remote!.nodeId === remote.nodeId ? from : `${ports.remote!.nodeId}/${from}`,
+        sessionID: remote.sessionID,
+        message: input.message,
+        ...(status ? { status } : {}),
+        ...(input.artifacts ? { artifacts: input.artifacts } : {}),
+        ...(input.queue ? { queue: true } : {}),
+      })
+      return { ...delivered, ...(status && !delivered.status ? { status } : {}) }
+    }
     const delivered = await ports.session.synthetic({
       sessionID: input.sessionID,
       text: envelope(from, reportBody(input.message, input.artifacts), status ? { status } : {}),

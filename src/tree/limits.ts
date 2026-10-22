@@ -4,17 +4,24 @@ import type { LimitPorts, Reservation } from "./ports.js"
 import { reportOf } from "./report.js"
 import { childStore } from "./store.js"
 import { childrenRefusal, depthRefusal, totalRefusal } from "./text.js"
+import { remoteRequest, remoteTarget } from "../platform/remote.js"
 
 /**
  * Whether a spawned session counts against the limits: it runs, unless its turn failed or was
  * interrupted since its last prompt, or it owes its parent a report. One OpenCode no longer knows does not.
  */
-async function live(ports: Pick<LimitPorts, "session" | "storage">, sessionID: string) {
+async function live(ports: Pick<LimitPorts, "session" | "storage" | "remote">, sessionID: string) {
+  const remote = remoteTarget(ports, sessionID)
   const [time, report] = await Promise.all([
-    ports.session.get({ sessionID }).then(
-      (info) => info.time,
-      (error: unknown) => (isNotFound(error) ? null : undefined),
-    ),
+    remote
+      ? remoteRequest<{ updated?: unknown; idle?: unknown }>(ports, remote.nodeId, "status", { sessionID: remote.sessionID }).then(
+          (info) => ({ updated: info.updated, idle: info.idle }) as Parameters<typeof busy>[0],
+          () => undefined,
+        )
+      : ports.session.get({ sessionID }).then(
+          (info) => info.time,
+          (error: unknown) => (isNotFound(error) ? null : undefined),
+        ),
     reportOf(childStore(ports.storage), sessionID).catch(() => undefined),
   ])
   if (time === null) return false

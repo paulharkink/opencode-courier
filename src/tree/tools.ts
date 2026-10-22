@@ -9,6 +9,11 @@ import { listChildren, status } from "./status.js"
 import { stop } from "./stop.js"
 import { tree } from "./subtree.js"
 import { childrenText, cleanupText, sendText, spawnText, statusText, stopText, treeText } from "./text.js"
+import { listRepositories } from "./repos.js"
+import { createIdentityManager, type IdentityManager } from "./session.js"
+import { childStore } from "./store.js"
+import { obj } from "../platform/json.js"
+import { close } from "./close.js"
 
 /**
  * The tree's courier tools: their input schemas, descriptions, and what each returns. The descriptions are
@@ -23,7 +28,8 @@ export const SpawnInput = Schema.Struct({
     Schema.Boolean.annotate({ description:
         "Run the session in its own git worktree so parallel sessions don't share files. From a session that is itself " +
         "isolated, the worktree starts from your current commit, not your uncommitted changes: commit first. The session " +
-        "commits on a branch named courier/<its session ID> and names it in its report; merge that branch yourself.",
+        "commits on a branch named courier/<its session ID> and names it in its report; merge that branch yourself. " +
+        "For a remote spawn, the result gives both the selected source directory and the child's actual worktree directory; do file work in the latter.",
     }),
   ),
   group: Schema.optional(
@@ -31,17 +37,34 @@ export const SpawnInput = Schema.Struct({
       description:
         "A join group: start the sessions of one batch with the same name, and their reports are held and delivered " +
         "to you in one message once every one of them has reported and your turn has ended, instead of one turn per " +
-        "report. A blocked report, a question, a permission request or a failed turn still reaches you at once. Letters, " +
+        "report. Use groups only for independent tasks that can finish without another worker's report, your decision or a follow-up dispatch; leave dependent work ungrouped. A blocked report, a question, a permission request or a failed turn still reaches you at once. Letters, " +
         "digits, dots, dashes and underscores, up to 60; the name is free again once the group has been delivered.",
     }),
   ),
+  peer: Schema.optional(Schema.String.annotate({ description: "Configured remote node to run the session on." })),
+  directory: Schema.optional(Schema.String.annotate({ description: "Absolute source directory on the peer, inside its allowed roots; required for a remote spawn. With isolate: true, the child works in its own worktree, whose actual directory is returned separately." })),
+  workName: Schema.optional(Schema.String.annotate({ description: "Short name for this assignment; required for a remote spawn and shared by both rosters." })),
+  repo: Schema.optional(Schema.Struct({
+    host: Schema.String.annotate({ description: "Exact advertised repository host." }),
+    name: Schema.String.annotate({ description: "Exact advertised repository name." }),
+    repoId: Schema.optional(Schema.String.annotate({ description: "Opaque repoId required when multiple clones remain ambiguous." })),
+  })),
+  branch: Schema.optional(Schema.Union([
+    Schema.Struct({ mode: Schema.Literal("existing"), name: Schema.String }),
+    Schema.Struct({ mode: Schema.Literal("create"), name: Schema.String, base: Schema.String }),
+  ]).annotate({ description: "Explicit existing branch, or exact new branch name and explicit base commit/ref." })),
+  checkout: Schema.optional(Schema.Union([
+    Schema.Struct({ mode: Schema.Literal("main") }),
+    Schema.Struct({ mode: Schema.Literal("existing-worktree"), worktreeId: Schema.String }),
+    Schema.Struct({ mode: Schema.Literal("create-worktree"), directory: Schema.String }),
+  ]).annotate({ description: "Explicit checkout choice. Creating a worktree requires an exact absolute destination inside the node's advertised worktreeRoot." })),
 })
 
 export const SendInput = Schema.Struct({
   sessionID: Schema.String.annotate({ description: "The session to deliver to." }),
   message: Schema.String.annotate({ description: "The message text." }),
   status: Schema.optional(
-    Schema.Literals(STATUSES).annotate({
+    Schema.NullOr(Schema.Literals(STATUSES)).annotate({
       description:
         "For a report to the session that started you: done, partial (some of the task is left), blocked (you need a " +
         "decision from it; say what) or failed. A message without a status is progress, not your report.",
@@ -69,6 +92,19 @@ export const SendInput = Schema.Struct({
 
 export const StatusInput = Schema.Struct({
   sessionID: Schema.String.annotate({ description: "The session to look at." }),
+})
+
+export const ReposInput = Schema.Struct({
+  peer: Schema.optional(Schema.String.annotate({ description: "Configured peer node to query. Without it, query local inventory and every configured peer." })),
+  query: Schema.optional(Schema.String.annotate({ description: "Optional case-insensitive search across repository host, name, path and branch." })),
+})
+
+export const SessionInput = Schema.Struct({
+  name: Schema.String.annotate({ description: "Required meaningful name for this user-facing Head Unit session. Children are named ROOT/LABEL." }),
+})
+
+export const CloseInput = Schema.Struct({
+  sessionID: Schema.String.annotate({ description: "A worker session you own, or this named root session to stop its children and close the root." }),
 })
 
 export const ChildrenInput = Schema.Struct({
@@ -106,10 +142,84 @@ export interface TreeToolPorts {
   readonly courier: CourierPorts
   readonly cleanup: CleanupPorts
   readonly stop: StopPorts
+  readonly identity?: IdentityManager
 }
 
 /** Adds the tree's courier tools, each a direct tool rather than a code-mode one. */
 export function addTreeTools(tools: ToolEditor, ports: TreeToolPorts) {
+  const identity = ports.identity ?? (ports.courier?.storage ? createIdentityManager(ports.courier.storage) : undefined)
+  const requireIdentity = () => {
+    if (!identity) throw new Error("Courier session identity is unavailable")
+    return identity
+  }
+  tools.add({
+    name: "courier_session",
+    options: { codemode: false },
+    description:
+      "Register this user-facing session as the named Courier Head Unit before it starts managed workers. " +
+      "The root name is shared across its tree and every child name is ROOT/LABEL. A managed worker cannot register itself as a root.",
+    input: SessionInput,
+    execute: async (input, context) => {
+      const session = await ports.courier.session.get({ sessionID: context.sessionID })
+      const projectID = session.projectID
+      const courier = obj(obj(session.metadata).courier)
+      if (typeof courier.parentID === "string" || typeof courier.remotePreparedBy === "string" || typeof courier.rootSessionID === "string")
+        throw new Error("managed Courier workers cannot register as a Head Unit")
+      if (await childStore(ports.courier.storage).indexedParent(context.sessionID))
+        throw new Error("managed Courier workers cannot register as a Head Unit")
+      const manager = requireIdentity()
+      const previous = await manager.get(context.sessionID, projectID)
+      if (previous && previous.name !== input.name) {
+        const owned = ports.courier.gate.assignments
+        if (owned && [...owned.values()].some((assignment) => assignment.rootSessionID === context.sessionID && !assignment.closed))
+          throw new Error("close this root's managed sessions before changing its name")
+      }
+      const root = await manager.register(context.sessionID, projectID, input.name)
+      return { content: `Courier Head Unit ${root.name} registered for session ${root.sessionID}.`, metadata: root }
+    },
+  })
+
+  tools.add({
+    name: "courier_close",
+    options: { codemode: false },
+    description:
+      "Interrupt a Courier worker with resume disabled, wait for OpenCode to confirm it is idle, and release only its session assignment. " +
+      "Closing this named Head Unit attempts every child and unregisters the root only when every child stopped. Branches, worktrees and session history are retained for manual cleanup.",
+    input: CloseInput,
+    execute: async (input, context) => {
+      const result = await close({ ...ports.stop, identity: requireIdentity() }, context.sessionID, input.sessionID).catch(rethrow("courier_close"))
+      const details = [
+        ...result.closedSessionIDs.map((sessionID) => `stopped ${sessionID}`),
+        ...result.releasedAssignments.map((assignmentID) => `released ${assignmentID}`),
+        ...result.errors.map((error) => `${error.sessionID}: ${error.message}`),
+      ]
+      return {
+        content: `${result.rootClosed ? "Head Unit closed." : "Close completed."} ${details.length ? details.join("; ") : "No workers required release."} Branches, worktrees and session history were retained.`,
+        metadata: result,
+      }
+    },
+  })
+
+  tools.add({
+    name: "courier_repos",
+    options: { codemode: false },
+    description:
+      "List repositories advertised by this node and its configured peers. Use the exact host and repository name, " +
+      "the node ID and repoId where clones are ambiguous, and an advertised worktreeId or worktreeRoot when choosing a checkout. " +
+      "Unavailable peers are returned as errors; no other node is substituted.",
+    input: ReposInput,
+    execute: async (input) => {
+      const result = await listRepositories(ports.courier, input).catch(rethrow("courier_repos"))
+      const lines = result.repositories.map((repo) =>
+        `${repo.nodeId}: ${repo.host}/${repo.name} repoId=${repo.repoId} path=${repo.path}` +
+        repo.worktrees.map((worktree) => `\n  ${worktree.kind} worktreeId=${worktree.worktreeId} branch=${worktree.branch} dirty=${worktree.dirty}`).join(""),
+      )
+      for (const [nodeId, directory] of Object.entries(result.worktreeRoots)) lines.push(`${nodeId}: configured worktreeRoot=${directory}`)
+      for (const error of result.errors) lines.push(`${error.peer}: unavailable: ${error.message}`)
+      return { content: lines.length ? lines.join("\n") : "No repositories are currently advertised.", metadata: result }
+    },
+  })
+
   tools.add({
     name: "courier_spawn",
     options: { codemode: false },
@@ -117,9 +227,14 @@ export function addTreeTools(tools: ToolEditor, ports: TreeToolPorts) {
       "Start a new OpenCode session on a task and return immediately. It runs on your model. The session reports " +
       "back with courier_send, which wakes this session, and you are told if its turn fails or ends without a report " +
       "instead, it waits for a permission or it asks a question. Give a batch of parallel sessions one group name to " +
-      "be woken once, with all their reports, instead of once per report. DO NOT poll it or call courier_status in a " +
+      "be woken once, with all their reports, instead of once per report. Group only independent tasks that can finish without another report, a Head decision or follow-up dispatch; grouped final reports wait for every member. Leave dependent tasks ungrouped. DO NOT poll it or call courier_status in a " +
       "loop: once you have started the sessions you need, end your turn by replying without calling more tools; each " +
-      "report, or each group's reports, starts a new turn in which you carry on. For long tasks, also courier_later a " +
+      "report, or each group's reports, starts a new turn in which you carry on. For a repo-map assignment, register this " +
+      "session with courier_session first, then choose an advertised repository and supply explicit branch and checkout intents. " +
+      "Creating a branch requires its exact name and base; creating a worktree requires an exact destination under the advertised worktreeRoot. " +
+      "Workers must ask this Head Unit to dispatch sibling work. Legacy bare-directory spawns are only available to unregistered sessions when no repo map is configured. " +
+      "For a remote legacy session, give its configured peer, absolute source directory and workName. Its stable ID is nodeId/sessionID. " +
+      "For long tasks, also courier_later a " +
       "check-in for yourself in case it never reports, and courier_cancel it when it does.",
     input: SpawnInput,
     execute: async (input, context) => {
@@ -140,7 +255,7 @@ export function addTreeTools(tools: ToolEditor, ports: TreeToolPorts) {
       "reports; the result says so, and nothing more is needed from you.",
     input: SendInput,
     execute: async (input, context) => {
-      const delivered = await send(ports.courier, context.sessionID, input).catch(rethrow("courier_send"))
+      const delivered = await send(ports.courier, context.sessionID, { ...input, status: input.status ?? undefined }).catch(rethrow("courier_send"))
       return { content: sendText(input.sessionID, delivered), metadata: delivered }
     },
   })

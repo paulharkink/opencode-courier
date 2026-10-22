@@ -97,6 +97,19 @@ export interface RosterEntry {
   readonly reports?: "status"
   /** The join group courier_spawn put it in, whose release holds its report; absent for a child in none. */
   readonly group?: string
+  /** The node that owns a remote session; the stable session reference is `nodeId/sessionID`. */
+  readonly nodeId?: string
+  /** The named assignment shared by both rosters for a remote child. */
+  readonly workName?: string
+  /** The named repo-map assignment held until courier_close confirms the worker stopped. */
+  readonly assignmentID?: string
+  readonly repoId?: string
+  readonly branch?: string
+  readonly worktreeId?: string
+  readonly rootSessionID?: string
+  readonly rootName?: string
+  /** True only for a worktree created by this assignment; selected existing/main checkouts are retained. */
+  readonly createdWorkspace?: boolean
   /** Created with OpenCode's own `parentID` (the `nativeChildren` option), so OpenCode shows its asks in its parent's view. */
   readonly native?: true
 }

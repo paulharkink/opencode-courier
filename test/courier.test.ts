@@ -1,4 +1,9 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
+import { execFileSync } from "node:child_process"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { createHash } from "node:crypto"
 import { spawn } from "../src/tree/spawn.js"
 import { send } from "../src/tree/send.js"
 import { listChildren, status } from "../src/tree/status.js"
@@ -8,6 +13,9 @@ import { describeFailure, envelope } from "../src/kernel/protocol.js"
 import { childBrief, reportBody } from "../src/tree/text.js"
 import { joinGroup } from "../src/tree/group.js"
 import { childStore, groupStore, memberKey, progressKey, rosterKey, settledKey } from "../src/tree/store.js"
+import { createIdentityManager } from "../src/tree/session.js"
+import { close } from "../src/tree/close.js"
+import { spawnText } from "../src/tree/text.js"
 
 type Call = { method: string; input: any }
 
@@ -68,6 +76,160 @@ function fakePorts(overrides: { messages?: unknown[]; info?: Record<string, unkn
 }
 
 describe("spawn", () => {
+  test("a configured repo map requires a registered Head Unit and forbids legacy spawn", async () => {
+    const { ports, calls } = fakePorts({ info: { projectID: "proj_1" } })
+    ;(ports as any).repoMap = { version: 1, nodeId: "node_a", repositories: [], peers: [] }
+
+    await expect(spawn(ports, "ses_parent", { task: "t", isolate: true })).rejects.toThrow("Register this user-facing session")
+    expect(afterLookups(calls)).toEqual([])
+
+    await createIdentityManager(ports.storage).register("ses_parent", "proj_1", "Polyrepo")
+    await expect(spawn(ports, "ses_parent", { task: "t", isolate: true })).rejects.toThrow("Registered Courier Head Units must spawn")
+    expect(afterLookups(calls)).toEqual([])
+  })
+
+  test("a registered Head Unit cannot bypass repo-map policy when no repo map is configured", async () => {
+    const { ports, calls } = fakePorts({ info: { projectID: "proj_1" } })
+    await createIdentityManager(ports.storage).register("ses_parent", "proj_1", "Polyrepo")
+
+    await expect(spawn(ports, "ses_parent", { task: "t", isolate: true })).rejects.toThrow("Registered Courier Head Units must spawn")
+    expect(afterLookups(calls)).toEqual([])
+  })
+
+  test("returns the canonical worktreeId from a repo-map spawn", async () => {
+    const root = mkdtempSync(join(tmpdir(), "courier-spawn-worktree-id-"))
+    try {
+      const repo = join(root, "repo")
+      const worktreeRoot = join(root, "worktrees")
+      mkdirSync(repo)
+      mkdirSync(worktreeRoot)
+      execFileSync("git", ["init", "-b", "main", repo])
+      execFileSync("git", ["-C", repo, "config", "user.name", "Courier Test"])
+      execFileSync("git", ["-C", repo, "config", "user.email", "courier@example.invalid"])
+      writeFileSync(join(repo, "README.md"), "test\n")
+      execFileSync("git", ["-C", repo, "add", "README.md"])
+      execFileSync("git", ["-C", repo, "commit", "-m", "init"])
+      const common = realpathSync(join(repo, execFileSync("git", ["-C", repo, "rev-parse", "--git-common-dir"], { encoding: "utf8" }).trim()))
+      const hash = (value: string) => createHash("sha256").update(value).digest("hex")
+      const { ports } = fakePorts({ info: { projectID: "proj_1" } })
+      ;(ports as any).repoMap = {
+        version: 1,
+        nodeId: "node-a",
+        worktreeRoot,
+        repositories: [{ host: "github.com", name: "team/repo", path: repo, repoId: hash(common), worktrees: [{ worktreeId: hash(realpathSync(repo)), branch: "main", kind: "main", dirty: false }] }],
+        peers: [],
+      }
+      ;(ports.gate as any).assignments = new Map()
+      await createIdentityManager(ports.storage).register("ses_parent", "proj_1", "Polyrepo")
+      const destination = join(worktreeRoot, "chosen")
+      const child = await spawn(ports, "ses_parent", {
+        task: "write a test",
+        workName: "Tests",
+        repo: { host: "github.com", name: "team/repo", repoId: hash(common) },
+        branch: { mode: "create", name: "feature/tests", base: "HEAD" },
+        checkout: { mode: "create-worktree", directory: destination },
+      })
+
+      expect(child).toMatchObject({ worktreeId: hash(realpathSync(destination)), branch: "feature/tests" })
+      expect(spawnText(child)).toContain(`worktreeId "${hash(realpathSync(destination))}"`)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a prepared remote worker is interrupted and released when starting it fails", async () => {
+    const { ports, store } = fakePorts({ info: { projectID: "proj_1" } })
+    const identity = createIdentityManager(ports.storage)
+    await identity.register("ses_parent", "proj_1", "Polyrepo")
+    ;(ports as any).remote = { nodeId: "head", peers: { worker: { url: "http://worker.test", secret: "x", allowedRoots: [] } } }
+    ;(ports.gate as any).assignments = new Map()
+    const operations: string[] = []
+    const fetch = spyOn(globalThis, "fetch").mockImplementation((async (_input: unknown, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body))
+      operations.push(request.operation)
+      if (request.operation === "repositories")
+        return Response.json({ result: { repositories: [{ nodeId: "worker", host: "github", name: "repo", path: "/remote/repo", repoId: "repo-id", worktrees: [{ worktreeId: "wt-id", branch: "main", kind: "main", dirty: false, path: "/remote/repo" }] }] } })
+      if (request.operation === "prepareRepo")
+        return Response.json({ result: { sessionID: "ses_remote", directory: "/remote/repo", sourceDirectory: "/remote/repo", title: "Task", assignmentID: "assignment_remote", branch: "main", baseCommit: "abc123", dirty: false } })
+      if (request.operation === "start") return Response.json({ error: "start refused" }, { status: 500 })
+      if (request.operation === "abortPreparedRepo") return Response.json({ result: { stopped: true, retainedWorkspace: true } })
+      return Response.json({ error: "unexpected operation" }, { status: 500 })
+    }) as typeof globalThis.fetch)
+    try {
+      await expect(spawn(ports, "ses_parent", {
+        task: "do work",
+        workName: "Task",
+        peer: "worker",
+        repo: { host: "github", name: "repo", repoId: "repo-id" },
+        branch: { mode: "existing", name: "main" },
+        checkout: { mode: "main" },
+      })).rejects.toThrow("start refused")
+      expect(operations).toEqual(["repositories", "prepareRepo", "start", "abortPreparedRepo"])
+      expect((ports.gate.assignments as Map<string, any>).get("assignment_remote").closed).toBe(true)
+      expect(await childStore(ports.storage).indexedEntry("worker/ses_remote")).toMatchObject({ assignmentID: "assignment_remote", nodeId: "worker" })
+      expect(store.has(rosterKey("ses_parent", "worker/ses_remote"))).toBe(true)
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
+  test("an unreachable remote abort keeps the assignment owned and returns an explicit close target", async () => {
+    const { ports } = fakePorts({ info: { projectID: "proj_1" } })
+    await createIdentityManager(ports.storage).register("ses_parent", "proj_1", "Polyrepo")
+    ;(ports as any).remote = { nodeId: "head", peers: { worker: { url: "http://worker.test", secret: "x", allowedRoots: [] } } }
+    ;(ports.gate as any).assignments = new Map()
+    const fetch = spyOn(globalThis, "fetch").mockImplementation((async (_input: unknown, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body))
+      if (request.operation === "repositories")
+        return Response.json({ result: { repositories: [{ nodeId: "worker", host: "github", name: "repo", path: "/remote/repo", repoId: "repo-id", worktrees: [{ worktreeId: "wt-id", branch: "main", kind: "main", dirty: false, path: "/remote/repo" }] }] } })
+      if (request.operation === "prepareRepo")
+        return Response.json({ result: { sessionID: "ses_remote", directory: "/remote/repo", sourceDirectory: "/remote/repo", title: "Task", assignmentID: "assignment_remote", branch: "main", baseCommit: "abc123", dirty: false } })
+      if (request.operation === "start") return Response.json({ error: "start refused" }, { status: 500 })
+      if (request.operation === "abortPreparedRepo") return Response.json({ error: "peer unavailable" }, { status: 503 })
+      return Response.json({ error: "unexpected operation" }, { status: 500 })
+    }) as typeof globalThis.fetch)
+    try {
+      await expect(spawn(ports, "ses_parent", {
+        task: "do work",
+        workName: "Task",
+        peer: "worker",
+        repo: { host: "github", name: "repo", repoId: "repo-id" },
+        branch: { mode: "existing", name: "main" },
+        checkout: { mode: "main" },
+      })).rejects.toThrow("Remote worker worker/ses_remote remains assigned")
+      expect((ports.gate.assignments as Map<string, any>).get("assignment_remote").sessionID).toBe("worker/ses_remote")
+      expect((ports.gate.assignments as Map<string, any>).get("assignment_remote").closed).toBeUndefined()
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
+  test("courier_close can recover a prepared remote session without a local roster entry", async () => {
+    const { ports } = fakePorts({ info: { projectID: "proj_1" } })
+    await createIdentityManager(ports.storage).register("ses_parent", "proj_1", "Polyrepo")
+    ;(ports as any).remote = { nodeId: "head", peers: { worker: { url: "http://worker.test", secret: "x", allowedRoots: [] } } }
+    let abortCalls = 0
+    const fetch = spyOn(globalThis, "fetch").mockImplementation((async (_input: unknown, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body))
+      expect(request.operation).toBe("abortPreparedRepo")
+      abortCalls += 1
+      return Response.json({ result: { stopped: true, retainedWorkspace: true } })
+    }) as typeof globalThis.fetch)
+    try {
+      const targetID = "worker/ses_remote"
+      const result = await close(
+        { courier: ports, identity: createIdentityManager(ports.storage), cancelScheduled: async () => [], cleanup: {} } as any,
+        "ses_parent",
+        targetID,
+      )
+      expect(abortCalls).toBe(1)
+      expect(result).toMatchObject({ closedSessionIDs: [targetID], releasedAssignments: [], errors: [], retainedWorkspaces: true })
+      expect(await childStore(ports.storage).indexedEntry(targetID)).toBeUndefined()
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
   test("creates the child, then prompts it with a brief naming the parent", async () => {
     const { ports, calls: all } = fakePorts()
 
@@ -202,66 +364,11 @@ describe("spawn", () => {
   })
 
   describe("nested isolation", () => {
-    /** ses_parent is an isolated child of ses_root, working in /wt/parent. */
-    const isolatedParent = async (ports: CourierPorts) =>
-      childStore(ports.storage).record({ sessionID: "ses_parent", parentID: "ses_root", title: "P", directory: "/wt/parent", isolated: true, createdAt: 1, base: "root000" })
-
-    test("starts an isolated child's worktree from an isolated parent's HEAD, and records it as the base", async () => {
-      const { ports, calls: all, store } = fakePorts()
-      await isolatedParent(ports)
-      const heads: string[] = []
-      ;(ports as any).head = async (directory: string) => (heads.push(directory), directory === "/wt/parent" ? "par777" : "par777")
-
-      const child = await spawn(ports, "ses_parent", { task: "t", isolate: true })
-
-      expect(afterLookups(all)[0]).toEqual({ method: "worktree.create", input: { projectID: "proj_1", from: "/wt/parent", branch: "par777" } })
-      expect(heads).toEqual(["/wt/parent", "/repo/.worktrees/ses"])
-      expect(store.get(rosterKey("ses_parent", "ses_child"))).toMatchObject({ isolated: true, base: "par777" })
-      expect(child).toMatchObject({ fromParent: true })
-      expect(child).not.toHaveProperty("uncommitted")
-    })
-
-    test("a root's isolated child, and a parent that is not isolated, start from the project", async () => {
-      const root = fakePorts()
-      await spawn(root.ports, "ses_root", { task: "t", isolate: true })
-      expect(afterLookups(root.calls)[0]!.input).toEqual({ projectID: "proj_1" })
-
-      const plain = fakePorts()
-      await childStore(plain.ports.storage).record({ sessionID: "ses_parent", parentID: "ses_root", title: "P", directory: "/repo", isolated: false, createdAt: 1 })
-      const child = await spawn(plain.ports, "ses_parent", { task: "t", isolate: true })
-      expect(afterLookups(plain.calls)[0]!.input).toEqual({ projectID: "proj_1" })
-      expect(child).not.toHaveProperty("fromParent")
-    })
-
-    test("a child that is not isolated does not read the parent's HEAD", async () => {
+    test("a spawned worker cannot create any Courier child session", async () => {
       const { ports, calls } = fakePorts()
-      await isolatedParent(ports)
-      ;(ports as any).head = async () => {
-        throw new Error("not read")
-      }
-      await spawn(ports, "ses_parent", { task: "t" })
-      expect(afterLookups(calls).map((call) => call.method)).toEqual(["session.create", "session.prompt"])
-    })
-
-    test("fails the spawn, starting nothing, when the parent's HEAD cannot be read", async () => {
-      const { ports, calls } = fakePorts()
-      await isolatedParent(ports)
-      ;(ports as any).head = async () => undefined
-
-      await expect(spawn(ports, "ses_parent", { task: "t", isolate: true })).rejects.toThrow("HEAD of your worktree /wt/parent could not be read")
+      await childStore(ports.storage).record({ sessionID: "ses_parent", parentID: "ses_root", title: "P", directory: "/wt/parent", isolated: true, createdAt: 1 })
+      await expect(spawn(ports, "ses_parent", { task: "t", isolate: true })).rejects.toThrow("Courier workers cannot start child sessions")
       expect(afterLookups(calls)).toEqual([])
-    })
-
-    test("warns when the parent's worktree has uncommitted changes, and not when git cannot tell", async () => {
-      const dirty = fakePorts()
-      await isolatedParent(dirty.ports)
-      ;(dirty.ports as any).dirty = async () => true
-      expect(await spawn(dirty.ports, "ses_parent", { task: "t", isolate: true })).toMatchObject({ fromParent: true, uncommitted: true })
-
-      const unknown = fakePorts()
-      await isolatedParent(unknown.ports)
-      ;(unknown.ports as any).dirty = async () => undefined
-      expect(await spawn(unknown.ports, "ses_parent", { task: "t", isolate: true })).not.toHaveProperty("uncommitted")
     })
 
     test("briefs an isolated child with its branch, and a plain one without", async () => {

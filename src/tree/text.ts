@@ -12,9 +12,10 @@ const STATUS_LIST = `${STATUSES.slice(0, -1).join(", ")} or ${STATUSES.at(-1)}`
 export const childBranch = (sessionID: string) => `courier/${sessionID}`
 
 /** What a spawned session at `depth` is told; `depth` 1 is a child of a session nobody spawned. `branch` is for an isolated one. */
-export function childBrief(parentID: string, task: string, depth: number, limits: Limits, branch?: string) {
+export function childBrief(parentID: string, task: string, depth: number, limits: Limits, branch?: string, workName?: string, managed = false) {
   return [
     `You were started by session ${parentID} through opencode-courier.`,
+    ...(workName ? [`Work assignment: ${workName}. Keep this name in progress messages and your final report.`] : []),
     "",
     `When you finish, send exactly one report: call courier_send with sessionID "${parentID}", a short account of what you did and ` +
       "status done, partial (say what is left and why) or failed (say what went wrong). Add artifacts where there are any: " +
@@ -23,14 +24,29 @@ export function childBrief(parentID: string, task: string, depth: number, limits
       "concrete ask, then end your turn and wait for its answer; never end quietly.",
     "A report with a status wakes the parent and is the only way it hears from you, so do not end without sending one. " +
       "A message without a status is progress, not your report: if you end your turn without a report, the parent is told so.",
-    "If you need the person to decide something, use your question tool; it reaches them through the session that started you.",
+    ...(managed
+      ? [
+          `You are a managed worker in Courier root ${workName?.split("/")[0] ?? "the Head Unit"}. Do not start any Courier child sessions; ask the Head Unit to dispatch sibling work.`,
+          "Work only in the assigned repository and checkout. Keep the assigned branch and directory; do not switch or rename branches.",
+          "Permission prompts and question dialogs stay on this node. If you need a decision from the Head Unit, send status blocked and wait for its Courier reply.",
+        ]
+      : workName
+        ? [
+            "You are a remote work session. Do not start Courier children; ask the Head Unit to dispatch any work in another repository.",
+            "Permission prompts and question dialogs stay on this node. If you need a decision from the Head Unit, send status blocked and wait for its Courier reply.",
+          ]
+      : ["If you need the person to decide something, use your question tool; it reaches them through the session that started you."]),
     "",
-    ...(branch ? [...isolationRule(branch, depth < limits.maxDepth), ""] : []),
-    ...splitRule(parentID, depth, limits),
+    ...(branch ? [...(managed ? assignedBranchRule(branch) : isolationRule(branch, depth < limits.maxDepth)), ""] : []),
+    ...(managed ? ["Do not split this managed task into Courier children. Report blocked to the Head Unit if sibling work is needed."] : splitRule(parentID, depth, limits)),
     "",
     "Task:",
     task,
   ].join("\n")
+}
+
+function assignedBranchRule(branch: string) {
+  return [`You work directly on the explicitly assigned branch ${branch}. Commit your changes to this branch and report its name; do not create, switch or rename branches.`]
 }
 
 function isolationRule(branch: string, mayPass: boolean) {
@@ -68,9 +84,13 @@ export const ROLE_PREFIX = "opencode-courier role:"
  * The system part naming a session's place in its tree: `depth` 0 for a session nobody spawned that
  * has started one, `null` for one that has started none, which is pointed to the skill. The same on every request.
  */
-export function rolePart(depth: number | null, limits: Limits) {
+export function rolePart(depth: number | null, limits: Limits, managedWorker = false, headUnitName?: string) {
   const { maxDepth, maxChildren, maxTotal } = limits
   const budget = `At most ${maxChildren} of the sessions you start run at once, and ${maxTotal} in the whole tree.`
+  if (managedWorker)
+    return `${ROLE_PREFIX} managed worker. You cannot start Courier sessions; ask the Head Unit to dispatch sibling work. Report blocked to the Head Unit if you need a decision or another worker.`
+  if (headUnitName)
+    return `${ROLE_PREFIX} Courier Head Unit ${JSON.stringify(headUnitName)}. Before a multi-file task, load the ${SKILL_ID} skill and recall once. You dispatch all managed workers yourself because managed workers cannot start Courier sessions. When a worker reports blocked, relay your decision to it with courier_send; start any needed follow-up sibling work yourself. Use a group only for independent tasks that can finish without another worker's report, your decision or a follow-up dispatch; grouped final reports wait for every member.`
   if (depth === null)
     return (
       `${ROLE_PREFIX} root, no sessions started yet. Before a task that touches several files or areas, load the ` +
@@ -141,6 +161,11 @@ export function reportBody(message: string, artifacts: Artifacts | undefined) {
 export function spawnText(child: {
   readonly sessionID: string
   readonly directory: string
+  readonly sourceDirectory?: string
+  readonly isolated?: boolean
+  readonly workName?: string
+  readonly worktreeId?: string
+  readonly branch?: string
   readonly group?: string
   readonly rosterError?: string
   readonly groupError?: string
@@ -159,8 +184,12 @@ export function spawnText(child: {
       "turn has ended, you get their reports in one message, which starts a new turn for you; a blocked report, a question " +
       "or a failed turn still reaches you at once."
     : "It will report back with courier_send, which starts a new turn for you."
+  const location = child.isolated && child.sourceDirectory
+    ? `in isolated worktree ${child.directory}, based on source directory ${child.sourceDirectory}. Do file work in the worktree at ${child.directory}; changes stay separate from the source directory until you merge them.`
+    : `in ${child.directory}`
+  const checkout = child.worktreeId ? ` Branch ${child.branch ?? ""} is available as worktreeId "${child.worktreeId}".` : ""
   return (
-    `Started session ${child.sessionID} in ${child.directory}. ${reports} Once you have started every session you need, ` +
+    `Started session ${child.sessionID} ${location}${child.workName ? ` for workName "${child.workName}"` : ""}.${checkout} ${reports} Once you have started every session you need, ` +
     `end your turn: reply without calling more tools. That does not drop the task; you carry on with it when the reports arrive.${warning}`
   )
 }
