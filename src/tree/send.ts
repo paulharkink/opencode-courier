@@ -4,6 +4,7 @@ import type { Artifacts, CourierPorts, Held, HeldReport, Membership, RosterEntry
 import { childStore, groupStore } from "./store.js"
 import { reportBody } from "./text.js"
 import { remoteRequest, remoteTarget } from "../platform/remote.js"
+import { isNotFound } from "../platform/json.js"
 
 export interface SendInput {
   readonly sessionID: string
@@ -44,6 +45,17 @@ export async function send(ports: CourierPorts, from: string, input: SendInput):
       description: `Message from ${from}`,
       metadata: { source: "courier", from, ...(status ? { status } : {}) },
       delivery: input.queue ? "queue" : "steer",
+    }).catch(async (error: unknown) => {
+      if (!isNotFound(error)) throw error
+      const matches = await childStore(ports.storage)
+        .children(from)
+        .then((children) => children.filter((child) => child.nodeId && child.sessionID === `${child.nodeId}/${input.sessionID}`))
+        .catch(() => [])
+      if (!matches.length) throw error
+      const targets = [...new Set(matches.map((child) => `${child.nodeId}/${input.sessionID}`))].sort()
+      if (targets.length === 1)
+        throw new Error(`Session not found locally: ${input.sessionID}. This is a recorded remote child; retry with sessionID "${targets[0]}".`)
+      throw new Error(`Session not found locally: ${input.sessionID}. It matches recorded remote children; choose a node-qualified sessionID: ${targets.map((target) => `"${target}"`).join(", ")}.`)
     })
     // A blocked report, once delivered, is the member's latest word: an earlier report held for it would be stale.
     if (noted?.member && status === "blocked") await unholdForBlocked(groupStore(ports.storage), noted.member).catch(() => undefined)

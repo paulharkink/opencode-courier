@@ -538,6 +538,70 @@ describe("send", () => {
     expect(calls[0]!.input.delivery).toBe("queue")
   })
 
+  test("suggests a qualified address only after a known remote child is not found locally", async () => {
+    const { ports, calls } = fakePorts()
+    const remote = {
+      nodeId: "head",
+      peers: { worker: { url: "http://worker:4097", secret: "test-secret", allowedRoots: [] } },
+    }
+    ;(ports as any).remote = remote
+    await childStore(ports.storage).record({
+      sessionID: "worker/ses_remote",
+      parentID: "ses_parent",
+      title: "Remote worker",
+      directory: "/repo",
+      isolated: false,
+      createdAt: 1,
+      nodeId: "worker",
+    })
+    // A valid local session with the same suffix must still be delivered locally.
+    await childStore(ports.storage).record({
+      sessionID: "ses_local",
+      parentID: "ses_parent",
+      title: "Local worker",
+      directory: "/repo",
+      isolated: false,
+      createdAt: 2,
+    })
+
+    expect(await send(ports, "ses_parent", { sessionID: "ses_local", message: "local" })).toEqual({ messageID: "msg_2" })
+    expect(calls.at(-1)?.method).toBe("session.synthetic")
+
+    const unknownError = Object.assign(new Error(""), { _tag: "Session.NotFoundError", sessionID: "ses_unknown" })
+    ;(ports.session as any).synthetic = async ({ sessionID }: { sessionID: string }) => {
+      throw sessionID === "ses_unknown" ? unknownError : Object.assign(new Error(""), { _tag: "Session.NotFoundError", sessionID })
+    }
+    await expect(send(ports, "ses_parent", { sessionID: "ses_remote", message: "remote" })).rejects.toThrow(
+      'Session not found locally: ses_remote. This is a recorded remote child; retry with sessionID "worker/ses_remote".',
+    )
+    await expect(send(ports, "ses_parent", { sessionID: "ses_unknown", message: "unknown" })).rejects.toBe(unknownError)
+
+    await childStore(ports.storage).record({
+      sessionID: "backup/ses_remote",
+      parentID: "ses_parent",
+      title: "Second remote worker",
+      directory: "/repo",
+      isolated: false,
+      createdAt: 3,
+      nodeId: "backup",
+    })
+    await expect(send(ports, "ses_parent", { sessionID: "ses_remote", message: "ambiguous" })).rejects.toThrow(
+      'choose a node-qualified sessionID: "backup/ses_remote", "worker/ses_remote".',
+    )
+
+    const fetch = spyOn(globalThis, "fetch").mockImplementation((async (_input: unknown, init?: RequestInit) => {
+      const envelope = JSON.parse(String(init?.body))
+      expect(envelope.operation).toBe("send")
+      expect(envelope.payload.sessionID).toBe("ses_remote")
+      return new Response(JSON.stringify({ result: { messageID: "remote-message" } }), { status: 200 })
+    }) as typeof globalThis.fetch)
+    try {
+      expect(await send(ports, "ses_parent", { sessionID: "worker/ses_remote", message: "qualified" })).toEqual({ messageID: "remote-message" })
+    } finally {
+      fetch.mockRestore()
+    }
+  })
+
   const spawned = { sessionID: "ses_child", parentID: "ses_parent", title: "t", directory: "/repo", isolated: false, createdAt: 1, reports: "status" as const }
   const report = { sessionID: "ses_parent", message: "m", status: "done" as const }
 
